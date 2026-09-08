@@ -25,10 +25,11 @@ class CloudSmokeVerifierTest(unittest.TestCase):
         for elapsed in [*range(0, 220, 5), duration]:
             final = elapsed == duration
             requested = min(frame_count - 1, int(elapsed * 30))
+            uploaded = requested if final else max(0, requested - 2)
             samples.append({
                 "elapsedSeconds": elapsed, "positionSeconds": elapsed,
                 "audioPositionSeconds": elapsed, "requestedFrame": requested,
-                "uploadedFrame": requested if final else max(0, requested - 2),
+                "uploadedFrame": uploaded, "uploadedPositionSeconds": uploaded / 30,
                 "playing": not final, "clipRunning": not final, "audioDriving": not final,
                 "warning": None, "heapUsedBytes": 256_000_000,
                 "nativeWidth": 480, "nativeHeight": 360,
@@ -59,6 +60,46 @@ class CloudSmokeVerifierTest(unittest.TestCase):
     def test_full_reference_run_accepts_honest_frame_skips(self):
         report = self.full_reference_report()
         self.assertIs(report["fullPlayback"], VERIFIER.verify_reference_full_run(report))
+
+    def test_full_reference_run_accepts_one_second_upload_lag_with_advancing_frames(self):
+        report = self.full_reference_report()
+        for sample in report["fullPlayback"]["samples"][1:-1]:
+            sample["uploadedFrame"] = sample["requestedFrame"] - 30
+            sample["uploadedPositionSeconds"] = sample["positionSeconds"] - 1
+        VERIFIER.verify_reference_full_run(report)
+
+    def test_full_reference_run_rejects_frozen_uploaded_frame_despite_advancing_clocks(self):
+        report = self.full_reference_report()
+        for sample in report["fullPlayback"]["samples"][13:40]:
+            sample["uploadedFrame"] = 1884
+            sample["uploadedPositionSeconds"] = 1884 / 30
+        with self.assertRaisesRegex(ValueError, "uploaded frame is stale"):
+            VERIFIER.verify_reference_full_run(report)
+
+    def test_full_reference_run_rejects_upload_lag_over_one_second(self):
+        report = self.full_reference_report()
+        sample = report["fullPlayback"]["samples"][8]
+        sample["uploadedFrame"] = sample["requestedFrame"] - 31
+        sample["uploadedPositionSeconds"] = sample["uploadedFrame"] / 30
+        with self.assertRaisesRegex(ValueError, "uploaded frame is stale"):
+            VERIFIER.verify_reference_full_run(report)
+
+    def test_full_reference_run_rejects_missing_or_invalid_uploaded_timestamp(self):
+        for value in (None, -1, float("nan"), 16):
+            with self.subTest(value=value):
+                report = self.full_reference_report()
+                report["fullPlayback"]["samples"][3]["uploadedPositionSeconds"] = value
+                with self.assertRaisesRegex(ValueError, "uploadedPositionSeconds|uploaded source timestamp"):
+                    VERIFIER.verify_reference_full_run(report)
+
+    def test_full_reference_run_rejects_stalled_upload_progress_within_freshness_bound(self):
+        report = self.full_reference_report()
+        sample = report["fullPlayback"]["samples"][4]
+        sample.update({"positionSeconds": 17.3, "audioPositionSeconds": 17.3,
+                       "requestedFrame": 519, "uploadedFrame": 489,
+                       "uploadedPositionSeconds": 16.3})
+        with self.assertRaisesRegex(ValueError, "uploaded source clock stalled"):
+            VERIFIER.verify_reference_full_run(report)
 
     def test_full_reference_run_accepts_initial_asynchronous_seek_and_final_audio_tail(self):
         report = self.full_reference_report()

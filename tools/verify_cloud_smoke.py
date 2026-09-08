@@ -36,7 +36,8 @@ def verify_reference_full_run(report: dict) -> dict:
     """Require native GPU and advancing audio evidence across the entire movie.
 
     This verifies uninterrupted real-time playback, not that software rendering
-    presented every source frame. Frame skips must instead be honestly counted.
+    presented every source frame. Frame skips must instead be honestly counted,
+    and the actual uploaded frame must remain fresh and advance with playback.
     The first raw Clip position may still belong to the preceding seek while
     Java Sound settles asynchronously; audio-clock checks begin at sample 1.
     """
@@ -96,6 +97,7 @@ def verify_reference_full_run(report: dict) -> dict:
         sample_elapsed = number(sample, "elapsedSeconds")
         position = number(sample, "positionSeconds")
         audio_position = number(sample, "audioPositionSeconds")
+        uploaded_position = number(sample, "uploadedPositionSeconds")
         requested = number(sample, "requestedFrame", integer=True)
         uploaded = number(sample, "uploadedFrame", integer=True)
         require(0 <= uploaded <= requested < frame_count,
@@ -132,6 +134,10 @@ def verify_reference_full_run(report: dict) -> dict:
                     f"Full playback was interrupted or lost its audio clock at sample {index}")
             require(abs(position - audio_position) <= 1,
                     f"Full playback audio/video clocks diverged at sample {index}")
+        require(0 <= uploaded_position <= duration and uploaded_position <= position + 1e-6,
+                f"Invalid or future uploaded source timestamp at full playback sample {index}")
+        require(position - uploaded_position <= 1.0 + 1e-6,
+                f"Full playback uploaded frame is stale by more than one second at sample {index}")
         if previous is not None:
             wall_gap = sample_elapsed - previous["elapsedSeconds"]
             require(0 < wall_gap <= interval * 1.5,
@@ -143,6 +149,11 @@ def verify_reference_full_run(report: dict) -> dict:
                     f"Full playback engine clock stalled at sample {index}")
             require(uploaded >= previous["uploadedFrame"] and requested >= previous["requestedFrame"],
                     f"Full playback source frames moved backward at sample {index}")
+            uploaded_advance = uploaded_position - previous["uploadedPositionSeconds"]
+            require(uploaded_advance >= -1e-6,
+                    f"Full playback uploaded source clock moved backward at sample {index}")
+            require(uploaded_advance + (1.0 if final else 0.2) >= wall_gap * 0.5,
+                    f"Full playback uploaded source clock stalled at sample {index}")
             if index > 1:
                 audio_advance = audio_position - previous["audioPositionSeconds"]
                 require(audio_advance >= -0.05, f"Full playback audio clock moved backward at sample {index}")

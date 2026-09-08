@@ -100,8 +100,10 @@ public final class PlaybackEngine implements Closeable {
         requireOpen();
         if (audioDriving && audio != null) {
             try {
-                long now = nanoClock.getAsLong();
                 long rawPosition = audio.getMicrosecondPosition();
+                // Native clock queries can block under load. Timestamp the returned sample,
+                // not the start of the call, or valid progress can look impossibly far ahead.
+                long now = nanoClock.getAsLong();
                 long elapsedMicros = Math.max(0, now - audioStartNanos) / 1000;
                 // DirectClip may expose the old device position while a seek is being applied.
                 // Never latch it as a new clock origin, or a backward seek can remain stuck at

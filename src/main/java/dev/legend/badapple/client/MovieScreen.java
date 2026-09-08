@@ -26,6 +26,8 @@ import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL13;
 import org.lwjgl.opengl.GL14;
 import org.lwjgl.opengl.GL20;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A native-resolution video texture on a vertical plane in the world.
@@ -36,6 +38,7 @@ import org.lwjgl.opengl.GL20;
  * thread. Close the screen before closing its PlaybackEngine.
  */
 public final class MovieScreen implements AutoCloseable {
+    private static final Logger LOGGER = LoggerFactory.getLogger("badapple");
     private final PlaybackEngine engine;
     private final FrameDecoder decoder;
     private NativeImageBackedTexture texture;
@@ -208,6 +211,9 @@ public final class MovieScreen implements AutoCloseable {
         }
 
         synchronized String error() {
+            if (!closed && error == null && !worker.isAlive()) {
+                error = "Frame decoder stopped unexpectedly";
+            }
             return error;
         }
 
@@ -275,7 +281,7 @@ public final class MovieScreen implements AutoCloseable {
 
                 NativeImage image = null;
                 try {
-                    image = NativeImage.read(engine.archive().readFrame(index));
+                    image = PngFrames.read(engine.archive().readFrame(index));
                     if (image.getWidth() != engine.metadata().width()
                             || image.getHeight() != engine.metadata().height()) {
                         throw new IOException("Frame " + index + " has unexpected dimensions");
@@ -303,6 +309,18 @@ public final class MovieScreen implements AutoCloseable {
                             return;
                         }
                     }
+                } catch (OutOfMemoryError | LinkageError fatal) {
+                    // A dead daemon must not leave an apparently healthy frozen
+                    // screen. Publish terminal failure once; never retry OOM.
+                    synchronized (this) {
+                        if (!closed) {
+                            error = "Frame decoder terminated at frame " + index + ": "
+                                    + fatal.getClass().getSimpleName() + ": " + fatal.getMessage();
+                            clearReady();
+                        }
+                    }
+                    LOGGER.error("Video frame decoder terminated at frame {}", index, fatal);
+                    return;
                 } finally {
                     // Includes seeks, close during decode, malformed images and
                     // canceled work. Ownership moves only after ready.put().

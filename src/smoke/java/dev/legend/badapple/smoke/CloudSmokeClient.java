@@ -3,6 +3,7 @@ package dev.legend.badapple.smoke;
 import com.google.gson.GsonBuilder;
 import dev.legend.badapple.client.BadAppleClient;
 import dev.legend.badapple.client.MovieScreen;
+import dev.legend.badapple.client.PngFrames;
 import dev.legend.badapple.playback.PlaybackEngine;
 import java.lang.reflect.Field;
 import java.io.InputStream;
@@ -41,6 +42,7 @@ import net.minecraft.text.Text;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.gen.WorldPresets;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.system.MemoryStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -148,6 +150,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 report.put("archiveSizeBytes", Files.size(selectedArchive));
                 report.put("renderer", GL11.glGetString(GL11.GL_RENDERER));
                 report.put("openGlVersion", GL11.glGetString(GL11.GL_VERSION));
+                verifyLargePngDecoder();
                 CreateWorldScreen.create(client, client.currentScreen);
                 advance(1, 0);
             }
@@ -479,21 +482,42 @@ public final class CloudSmokeClient implements ClientModInitializer {
         Clip clip = field(player, "audio", Clip.class);
         require(clip != null, "Full reference sample retains its Java Sound device");
         Map<String, Object> sample = new LinkedHashMap<>();
-        sample.put("elapsedSeconds", (System.nanoTime() - fullStartedNanos) / 1e9);
-        sample.put("positionSeconds", player.positionSeconds());
-        sample.put("audioPositionSeconds", clip.getMicrosecondPosition() / 1_000_000.0);
-        sample.put("requestedFrame", player.currentFrameIndex());
+        long beforeEngineRead = System.nanoTime();
+        double position;
+        synchronized (player) {
+            position = player.positionSeconds();
+            long afterEngineRead = System.nanoTime();
+            // Use the device position accepted by this exact engine update for
+            // synchronized A/V evidence. A second ALSA query can itself block,
+            // so record that independent raw reading with its own timestamps.
+            sample.put("elapsedSeconds", (afterEngineRead - fullStartedNanos) / 1e9);
+            sample.put("positionSeconds", position);
+            sample.put("audioPositionSeconds", field(player, "lastAudioPosition", Long.class) / 1_000_000.0);
+            sample.put("engineClockReadMillis", (afterEngineRead - beforeEngineRead) / 1e6);
+            sample.put("playing", field(player, "playRequested", Boolean.class));
+            sample.put("audioDriving", field(player, "audioDriving", Boolean.class));
+            sample.put("warning", player.warning());
+            long beforeRawRead = System.nanoTime();
+            sample.put("rawAudioPositionSeconds", clip.getMicrosecondPosition() / 1_000_000.0);
+            long afterRawRead = System.nanoTime();
+            sample.put("rawAudioReadMillis", (afterRawRead - beforeRawRead) / 1e6);
+            sample.put("rawAudioObservedElapsedSeconds", (afterRawRead - fullStartedNanos) / 1e9);
+            sample.put("elapsedAfterClockReadsSeconds", (afterRawRead - fullStartedNanos) / 1e9);
+        }
+        long[] sourceTimestamps = player.metadata().frameTimestampsMicros();
+        int requested = Arrays.binarySearch(sourceTimestamps, (long) (position * 1_000_000));
+        if (requested < 0) requested = -requested - 2;
+        sample.put("requestedFrame", Math.max(0, Math.min(sourceTimestamps.length - 1, requested)));
         sample.put("uploadedFrame", uploaded);
-        sample.put("playing", player.isPlaying());
+        double uploadedPosition = sourceTimestamps[uploaded] / 1_000_000.0;
+        sample.put("uploadedPositionSeconds", uploadedPosition);
         sample.put("clipRunning", clip.isRunning());
-        sample.put("audioDriving", field(player, "audioDriving", Boolean.class));
-        sample.put("warning", player.warning());
         sample.put("heapUsedBytes", heapUsedBytes());
         sample.put("nativeWidth", player.width());
         sample.put("nativeHeight", player.height());
         NativeImageBackedTexture texture = field(movie, "texture", NativeImageBackedTexture.class);
         int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-        try (NativeImage source = NativeImage.read(player.archive().readFrame(uploaded));
+        try (NativeImage source = PngFrames.read(player.archive().readFrame(uploaded));
                 NativeImage gpu = new NativeImage(player.width(), player.height(), false)) {
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture.getGlId());
             gpu.loadFromTextureImage(0, false);
@@ -512,6 +536,16 @@ public final class CloudSmokeClient implements ClientModInitializer {
         }
         fullPeakHeapUsedBytes = Math.max(fullPeakHeapUsedBytes, ((Number) sample.get("heapUsedBytes")).longValue());
         fullSamples.add(sample);
+        require(uploadedPosition <= position + 0.000001 && position - uploadedPosition <= 1,
+                "Full reference uploaded frame remains within one second of the actual playback clock");
+        if (fullSamples.size() > 1) {
+            Map<String, Object> previous = fullSamples.get(fullSamples.size() - 2);
+            double wallGap = ((Number) sample.get("elapsedSeconds")).doubleValue()
+                    - ((Number) previous.get("elapsedSeconds")).doubleValue();
+            double sourceAdvance = uploadedPosition - ((Number) previous.get("uploadedPositionSeconds")).doubleValue();
+            require(sourceAdvance + (ended ? 1 : 0.2) >= wallGap * 0.5,
+                    "Full reference uploaded source frames continue advancing between evidence samples");
+        }
         LOGGER.info("BADAPPLE_FULL_REFERENCE_SAMPLE elapsed={} position={} uploadedFrame={} ended={}",
                 sample.get("elapsedSeconds"), sample.get("positionSeconds"), uploaded, ended);
     }
@@ -566,6 +600,38 @@ public final class CloudSmokeClient implements ClientModInitializer {
             }
         }
         return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private void verifyLargePngDecoder() throws Exception {
+        int pointerBefore = MemoryStack.stackGet().getPointer();
+        byte[] encoded;
+        int[] expected;
+        try (NativeImage noise = new NativeImage(512, 384, false)) {
+            int state = 0x4bad1234;
+            for (int y = 0; y < noise.getHeight(); y++) {
+                for (int x = 0; x < noise.getWidth(); x++) {
+                    state ^= state << 13;
+                    state ^= state >>> 17;
+                    state ^= state << 5;
+                    noise.setColor(x, y, 0xff000000 | (state & 0x00ffffff));
+                }
+            }
+            encoded = noise.getBytes();
+            expected = noise.copyPixelsRgba();
+        }
+        require(encoded.length > 64 * 1024, "Large-PNG regression fixture exceeds the default 64KiB native stack");
+        for (int iteration = 0; iteration < 16; iteration++) {
+            try (NativeImage decoded = PngFrames.read(encoded)) {
+                require(decoded.getWidth() == 512 && decoded.getHeight() == 384
+                                && Arrays.equals(expected, decoded.copyPixelsRgba()),
+                        "Large-PNG stream decoding repeatedly preserves every native pixel");
+            }
+            require(MemoryStack.stackGet().getPointer() == pointerBefore,
+                    "PNG decoding restores native scratch-stack scope after every iteration");
+        }
+        report.put("largePngRegression", Map.of("status", "passed", "encodedBytes", encoded.length,
+                "decodeIterations", 16, "pixelsCompared", 16L * 512 * 384,
+                "nativeStackPointerPreserved", true));
     }
 
     private void command(MinecraftClient client, String command) throws Exception {
@@ -650,7 +716,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
         checkpoint.put("worldWidth", field(screen, "width", Double.class));
         checkpoint.put("worldHeight", field(screen, "height", Double.class));
         int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
-        try (NativeImage source = NativeImage.read(engine.archive().readFrame(delivered));
+        try (NativeImage source = PngFrames.read(engine.archive().readFrame(delivered));
                 NativeImage gpu = new NativeImage(engine.width(), engine.height(), false)) {
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture.getGlId());
             gpu.loadFromTextureImage(0, false);

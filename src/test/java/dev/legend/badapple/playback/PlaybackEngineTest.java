@@ -281,6 +281,25 @@ class PlaybackEngineTest {
     }
 
     @Test
+    void blockingDeviceReadDoesNotRejectHealthyProgressOrReportFalseStall() throws Exception {
+        AtomicLong nanos = new AtomicLong();
+        SimulatedClip device = new SimulatedClip();
+        try (PlaybackEngine engine = engine(nanos, device)) {
+            engine.play();
+            nanos.addAndGet(2_100_000_000L);
+            device.beforePositionRead = () -> {
+                // A native device query takes a second, while hardware keeps rendering.
+                nanos.addAndGet(1_000_000_000L);
+                device.positionMicros = 3_100_000;
+            };
+            assertEquals(3.1, engine.positionSeconds(), 0.000001);
+            assertNull(engine.warning());
+            assertFalse(device.closed);
+            assertTrue(engine.isPlaying());
+        }
+    }
+
+    @Test
     void shorterAudioHandsOffToWallClockForFinalVideoFrames() throws Exception {
         AtomicLong nanos = new AtomicLong();
         SimulatedClip device = new SimulatedClip();
@@ -326,10 +345,16 @@ class PlaybackEngineTest {
         private boolean running;
         private boolean closed;
         private int flushes;
+        private Runnable beforePositionRead;
 
         private final Clip clip = (Clip) Proxy.newProxyInstance(Clip.class.getClassLoader(),
                 new Class<?>[]{Clip.class}, (proxy, method, args) -> switch (method.getName()) {
-                    case "getMicrosecondPosition" -> positionMicros;
+                    case "getMicrosecondPosition" -> {
+                        Runnable callback = beforePositionRead;
+                        beforePositionRead = null;
+                        if (callback != null) callback.run();
+                        yield positionMicros;
+                    }
                     case "getMicrosecondLength" -> lengthMicros;
                     case "getFramePosition" -> framePositionOverride != null
                             ? framePositionOverride : (int) (positionMicros * 48_000 / 1_000_000);
