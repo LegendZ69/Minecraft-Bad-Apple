@@ -1,0 +1,39 @@
+name: Build and verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install media tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Verify video conversion
+        run: python -m unittest discover -s tests -v
+      - name: Compile mod and test playback
+        run: gradle --no-daemon build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-bad-apple-fabric-1.21.1
+          path: |
+            build/libs/minecraft-bad-apple-1.0.0.jar
+            tools/prepare_video.py
+            README.md
+          if-no-files-found: error

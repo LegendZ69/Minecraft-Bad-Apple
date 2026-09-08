@@ -1,0 +1,16 @@
+.gradle/
+build/
+run/
+out/
+.idea/
+*.iml
+__pycache__/
+.pytest_cache/
+*.pyc
+media/
+*.bapple
+*.mp4
+*.webm
+*.mkv
+*.wav
+*.ogg

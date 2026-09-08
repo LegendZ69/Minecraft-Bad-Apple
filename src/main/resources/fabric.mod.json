@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "badapple",
+  "version": "${version}",
+  "name": "Minecraft Bad Apple",
+  "description": "Native-resolution, timestamp-driven video and synchronized audio on an in-world Minecraft screen.",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.legend.badapple.client.BadAppleClient"] },
+  "contact": { "sources": "https://github.com/LegendZ69/Minecraft-Bad-Apple" },
+  "depends": {
+    "fabricloader": ">=0.16.5",
+    "fabric-api": "*",
+    "minecraft": "1.21.1",
+    "java": ">=21"
+  }
+}
