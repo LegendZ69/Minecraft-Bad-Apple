@@ -29,6 +29,7 @@ MAX_FRAMES = 500_000
 MAX_DURATION_MICROS = 6 * 60 * 60 * 1_000_000
 AUDIO_RATE = 48_000
 MAX_AUDIO_BYTES = 256 * 1024 * 1024
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 class ConversionError(Exception):
@@ -190,8 +191,11 @@ def prepare_video(source: Path, output: Path, *, force: bool = False,
                     raise ConversionError("Decoded audio does not match the required format or video duration.")
             manifest["audio"] = "audio.wav"
         archive = temp / "result.bapple"
+        manifest_bytes = (json.dumps(manifest, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+            raise ConversionError("Video manifest exceeds the player's 8 MiB limit.")
         with zipfile.ZipFile(archive, "w", allowZip64=True) as bundle:
-            bundle.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", compress_type=zipfile.ZIP_DEFLATED)
+            bundle.writestr("manifest.json", manifest_bytes, compress_type=zipfile.ZIP_DEFLATED)
             for path in frame_paths:
                 bundle.write(path, f"frames/{path.name}", compress_type=zipfile.ZIP_STORED)
             if has_audio:

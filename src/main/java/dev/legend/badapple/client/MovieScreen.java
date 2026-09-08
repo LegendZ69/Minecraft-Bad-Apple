@@ -216,8 +216,10 @@ public final class MovieScreen implements AutoCloseable {
                 return null;
             }
             int target = Math.max(0, Math.min(frameCount - 1, requested));
-            if (target < desired || target > desired + READY_LIMIT) {
-                // A rewind, loop or large seek invalidates in-flight work.
+            if (target < desired) {
+                // Only a rewind or loop invalidates in-flight work. On a
+                // forward jump, retain the newest due image so a low render
+                // rate cannot repeatedly discard every completed decode.
                 generation++;
                 clearReady();
                 delivered = -1;
