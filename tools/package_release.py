@@ -148,11 +148,14 @@ def collect_evidence(root: Path | None) -> dict[str, bytes]:
         is_screenshot |= relative.parts[:-1] == ("reference",) and path.name in {
             checkpoint + suffix for checkpoint in REFERENCE_CHECKPOINTS for suffix in SCREENSHOT_SUFFIXES
         }
+        is_screenshot |= relative.parts[:-1] == ("production",) and path.name in {
+            checkpoint + suffix for checkpoint in CHECKPOINTS for suffix in SCREENSHOT_SUFFIXES
+        }
         is_report = (len(relative.parts) == 1 and path.name in ROOT_REPORTS) or (
             len(relative.parts) == 2 and relative.parts[0] == "reports" and path.suffix.lower() in REPORT_SUFFIXES
             and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", path.name))
         )
-        is_report |= relative.parts[:-1] == ("reference",) and path.name in {
+        is_report |= relative.parts[:-1] in (("reference",), ("production",)) and path.name in {
             "smoke-report.json", "audio-output-report.json",
         }
         if not (is_screenshot or is_report):
@@ -291,6 +294,62 @@ def validate_original(evidence: dict[str, bytes], evidence_dir: Path | None) -> 
             "youtubeReferenceEquivalenceVerified": False, "physicalAudioVerified": False}
 
 
+def validate_production(evidence: dict[str, bytes], evidence_dir: Path | None,
+                        jar: Path, version: str) -> dict:
+    """Bind actual non-development intermediary runtime evidence to this JAR."""
+    report_name = "production/smoke-report.json"
+    audio_name = "production/audio-output-report.json"
+    require(report_name in evidence and audio_name in evidence and evidence_dir is not None,
+            "Production release-JAR smoke and audio evidence are required.")
+    runtime = read_json(evidence[report_name], report_name)
+    audio = read_json(evidence[audio_name], audio_name)
+    require(runtime.get("runtimeMode") == "production" and runtime.get("developmentEnvironment") is False
+            and runtime.get("runtimeNamespace") == "intermediary",
+            "Production smoke must run without development mode in the intermediary namespace.")
+    require(runtime.get("loadedModVersion") == version,
+            "Production smoke loaded a different mod version.")
+    jar_digest = sha256(jar)
+    require(runtime.get("loadedModJarSha256") == jar_digest and runtime.get("expectedModJarSha256") == jar_digest,
+            "Production smoke did not load the exact release JAR SHA-256.")
+    for name in CHECKPOINTS:
+        for suffix in SCREENSHOT_SUFFIXES:
+            relative = "production/" + name + suffix
+            require(relative in evidence, f"Production release-JAR screenshot missing: {relative}")
+            require((evidence_dir / relative).read_bytes() == evidence[relative],
+                    "Production screenshot changed during evidence collection.")
+    runtime_path = evidence_dir / report_name
+    require(runtime_path.read_bytes() == evidence[report_name],
+            "Production runtime report changed during evidence collection.")
+    if __package__ in (None, ""):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from tools.verify_cloud_smoke import verify_report
+        verified = verify_report(runtime_path, reference=False)
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise ReleaseError("Production release-JAR runtime verification failed.") from exc
+    require(verified == runtime, "Production runtime report changed during verification.")
+    require(runtime.get("javaSoundClipOpened") is True and runtime.get("audioClockAdvanced") is True
+            and runtime.get("audioWarning") is None and not runtime.get("audioWarnings"),
+            "Production release-JAR audio failed or fell back to a silent clock.")
+    require(audio.get("status") == "passed" and audio.get("virtualSinkOutputVerified") is True
+            and audio.get("sampleRate") == 48000 and audio.get("channels") == 2
+            and audio.get("physicalAudioVerified") is False and audio.get("syntheticStereoAgreementVerified") is True
+            and audio.get("expectedToneHz") == 440,
+            "Production release-JAR requires passed stereo 440-Hz virtual-sink output evidence.")
+    matching, non_silent = audio.get("matchingToneWindows"), audio.get("nonSilentWindows")
+    require(type(matching) is int and type(non_silent) is int and 5 <= matching <= non_silent
+            and matching / non_silent >= 0.8,
+            "Production release-JAR audio lacks sustained matching test-tone output.")
+    captured = audio.get("capturedSeconds")
+    require(type(captured) in (int, float) and math.isfinite(captured) and captured >= 6,
+            "Production audio capture does not cover the uninterrupted six-second smoke fixture.")
+    return {"status": "passed", "runtimeMode": "production", "developmentEnvironment": False,
+            "runtimeNamespace": "intermediary", "loadedModVersion": version,
+            "loadedModJarSha256": jar_digest, "stereoVirtualSinkOutputVerified": True,
+            "physicalAudioVerified": False,
+            "scope": "Exact release JAR in a non-development intermediary runtime; synthetic audiovisual fixture and command/screen smoke checks."}
+
+
 def zip_deterministic(destination: Path, members: dict[str, bytes]) -> None:
     with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, data in sorted(members.items()):
@@ -315,7 +374,8 @@ def timestamp() -> str:
 
 def package_release(*, version: str, commit: str, jar: Path, output: Path,
                     evidence_dir: Path | None = None, no_smoke_required: bool = False,
-                    source_dir: Path | None = None, require_original: bool = False) -> dict:
+                    source_dir: Path | None = None, require_original: bool = False,
+                    require_production: bool = False) -> dict:
     valid_version(version)
     require(bool(re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit)), "Commit must be a full 40- or 64-character hexadecimal Git SHA.")
     require(not no_smoke_required or version == "1.0.0", "--no-smoke-required is only allowed for the historical 1.0.0 baseline.")
@@ -325,6 +385,7 @@ def package_release(*, version: str, commit: str, jar: Path, output: Path,
     evidence = collect_evidence(evidence_dir)
     smoke = None if no_smoke_required else validate_smoke(evidence)
     original = validate_original(evidence, evidence_dir) if require_original else None
+    production = validate_production(evidence, evidence_dir, jar, version) if require_production else None
     files = ["README.md", "tools/prepare_video.py", "tools/verify_archive.py", "tools/generate_fixture.py"]
     for name in files:
         require((source / name).is_file() and not (source / name).is_symlink(), f"Portable bundle source is missing: {name}")
@@ -354,6 +415,7 @@ def package_release(*, version: str, commit: str, jar: Path, output: Path,
         "releaseAssets": sorted(assets), "sourceMediaIncluded": False,
         "verification": {"smokeStatus": "passed" if smoke else "not-run-historical-baseline",
                          "originalRequired": require_original, "originalReference": original,
+                         "productionRequired": require_production, "productionRuntime": production,
                          "physicalAudioVerified": False,
                          "scope": ("Original-source acquisition, exhaustive local-source comparison, uninterrupted Minecraft playback and stereo virtual-sink output verified; user YouTube equivalence and physical speakers remain unverified."
                                    if original else "Synthetic cloud evidence does not establish reference-media provenance or physical audio fidelity.")},
@@ -429,18 +491,20 @@ def main() -> int:
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--no-smoke-required", action="store_true", help="historical 1.0.0 baseline only")
     parser.add_argument("--require-original", action="store_true", help="require acquired original, exhaustive source comparison, full Minecraft playback and stereo output evidence")
+    parser.add_argument("--require-production", action="store_true", help="require exact release-JAR smoke and stereo output in a non-development intermediary runtime")
     parser.add_argument("--verify-directory", type=Path, help="verify all existing release assets without modifying them")
     args = parser.parse_args()
     try:
         if args.verify_directory:
-            require(not any([args.version, args.commit, args.jar, args.output, args.evidence_dir, args.no_smoke_required, args.require_original]),
+            require(not any([args.version, args.commit, args.jar, args.output, args.evidence_dir, args.no_smoke_required,
+                             args.require_original, args.require_production]),
                     "--verify-directory cannot be combined with packaging options.")
             result = verify_directory(args.verify_directory)
         else:
             require(all([args.version, args.commit, args.jar, args.output]), "Packaging requires --version, --commit, --jar, and --output.")
             result = package_release(version=args.version, commit=args.commit, jar=args.jar, output=args.output,
                                      evidence_dir=args.evidence_dir, no_smoke_required=args.no_smoke_required,
-                                     require_original=args.require_original)
+                                     require_original=args.require_original, require_production=args.require_production)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except (ReleaseError, OSError, ValueError) as exc:

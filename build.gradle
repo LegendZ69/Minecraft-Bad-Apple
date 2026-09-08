@@ -60,6 +60,25 @@ loom {
 }
 
 check.dependsOn tasks.named('compileSmokeJava')
+
+// Opt-in test artifacts only: never added to assemble, remapJar or publication.
+tasks.register('smokeJar', Jar) {
+    dependsOn tasks.named('smokeClasses')
+    from sourceSets.smoke.output
+    archiveFileName = 'badapple-smoke-named.jar'
+    destinationDirectory = layout.buildDirectory.dir('smoke-libs')
+}
+tasks.register('remapSmokeJar', net.fabricmc.loom.task.RemapJarTask) {
+    dependsOn tasks.named('smokeJar')
+    inputFile = tasks.named('smokeJar', Jar).flatMap { it.archiveFile }
+    archiveFileName = 'badapple-smoke.jar'
+    destinationDirectory = layout.buildDirectory.dir('smoke-libs')
+    sourceNamespace = 'named'
+    targetNamespace = 'intermediary'
+    classpath.from sourceSets.smoke.compileClasspath
+    addNestedDependencies = false
+}
+
 tasks.withType(AbstractArchiveTask).configureEach {
     preserveFileTimestamps = false
     reproducibleFileOrder = true

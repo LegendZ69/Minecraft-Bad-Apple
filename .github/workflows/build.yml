@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       LIBGL_ALWAYS_SOFTWARE: '1'
       PULSE_SINK: badapple
@@ -65,6 +65,30 @@ jobs:
           wait "$capture_pid" || true
           trap - EXIT
           python tools/verify_cloud_smoke.py build/cloud-verification/smoke-report.json --audio-capture build/captured-audio.wav --require-audio
+      - name: Prepare exact-JAR production test launcher
+        run: |
+          gradle --no-daemon remapSmokeJar
+          mkdir -p build/production-toolchain build/production-game/badapple build/production-verification
+          curl --fail --location --retry 2 --output build/production-toolchain/gradle-8.12-bin.zip https://services.gradle.org/distributions/gradle-8.12-bin.zip
+          # Published by https://gradle.org/release-checksums/ (Gradle 8.12 binary ZIP).
+          echo '7a00d51fb93147819aab76024feece20b6b84e420694101f276be952e08bef03  build/production-toolchain/gradle-8.12-bin.zip' | sha256sum --check
+          unzip -q build/production-toolchain/gradle-8.12-bin.zip -d build/production-toolchain
+          cp build/smoke-game/badapple/smoke.bapple build/production-game/badapple/smoke.bapple
+          cp tools/cloud-smoke-options.txt build/production-game/options.txt
+      - name: Verify exact release JAR in Fabric production runtime
+        env:
+          ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
+        run: |
+          parec --device=badapple.monitor --format=s16le --rate=48000 --channels=2 --file-format=wav build/production-captured-audio.wav &
+          capture_pid=$!
+          trap 'kill -INT "$capture_pid" 2>/dev/null || true' EXIT
+          timeout 600s build/production-toolchain/gradle-8.12/bin/gradle --no-daemon -p tools/production-smoke prodSmokeClient 2>&1 | tee build/cloud-verification/reports/production-minecraft-client.txt
+          kill -INT "$capture_pid"
+          wait "$capture_pid" || true
+          trap - EXIT
+          python tools/verify_cloud_smoke.py build/production-verification/smoke-report.json --audio-capture build/production-captured-audio.wav --require-audio
+          mkdir -p build/cloud-verification/production
+          cp build/production-verification/*.json build/production-verification/*.png build/cloud-verification/production/
       - name: Exhaustive full-length synthetic stress test
         run: |
           python tools/generate_fixture.py --duration 219 --output build/stress.mkv
@@ -93,7 +117,7 @@ jobs:
           cp build/reference-verification/*.json build/reference-verification/*.png build/cloud-verification/reference/
       - name: Package versioned release and verify checksums
         run: |
-          python tools/package_release.py --version 1.1.0 --commit "$GITHUB_SHA" --jar build/libs/minecraft-bad-apple-1.1.0.jar --output dist/v1.1.0 --evidence-dir build/cloud-verification --require-original
+          python tools/package_release.py --version 1.1.0 --commit "$GITHUB_SHA" --jar build/libs/minecraft-bad-apple-1.1.0.jar --output dist/v1.1.0 --evidence-dir build/cloud-verification --require-original --require-production
           python tools/package_release.py --verify-directory dist/v1.1.0
       - uses: actions/upload-artifact@v4
         with:
@@ -113,11 +137,16 @@ jobs:
             build/reference-verification/*.json
             build/reference-verification/*.png
             build/smoke-game/logs/latest.log
+            build/production-verification/*.json
+            build/production-verification/*.png
+            build/production-game/logs/latest.log
           if-no-files-found: warn
       - name: Preserve synthetic-only sink recording for audio diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: synthetic-audio-diagnostics
-          path: build/captured-audio.wav
+          path: |
+            build/captured-audio.wav
+            build/production-captured-audio.wav
           if-no-files-found: warn

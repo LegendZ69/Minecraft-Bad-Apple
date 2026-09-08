@@ -81,10 +81,15 @@ bytes. The hash identifies this downloaded file, not every encoding the service
 might provide later. The technical report does not independently authenticate
 ownership or establish redistribution rights.
 
-Playback of this original-source archive inside Minecraft is **not yet
-verified** in this record; it is a separate runtime check. Neither the label's
-official YouTube upload nor the user's YouTube reference has a verified
-frame/audio comparison with this source.
+Full playback of this original-source archive inside Minecraft is **not yet
+verified** in this record; the current
+[integrated run](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059)
+checks that separately after compilation, synthetic runtime testing, and
+source-to-archive verification. Runtime checks use actual Minecraft 1.21.1 with
+Fabric's development runtime, not the remapped JAR in an installed production
+profile. Neither YouTube upload has a verified frame/audio comparison with this
+source. See the [v1.1.0 verification record](releases/v1.1.0.md) for final scope
+and results when available.
 
 `python tools/probe_references.py --report build/reference-access.json` records a fresh,
 bounded public metadata probe for each exact URL. A metadata success does not
@@ -120,9 +125,11 @@ different source as the user's exact reference without comparing it.
 
 ## Distribution boundary
 
-Public project releases contain project code and synthetic verification
-material, not the Bad Apple!! animation or recording. Synthetic fixtures are
-clearly labeled and do not stand in for the requested animation.
+Public project releases contain project code, synthetic fixtures, and diagnostic
+evidence such as reports and selected in-game screenshots. Screenshots may show
+animation stills, but the source video, complete animation/archive, and recording
+are not bundled. Synthetic fixtures are clearly labeled and do not stand in for
+the requested animation.
 
 No permission to bundle the original media has been established. The
 [official Touhou fan guidelines](https://touhou-project.news/guidelines_en/)

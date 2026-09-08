@@ -14,7 +14,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.package_release import (
     CHECKPOINTS, ENTRYPOINT, REFERENCE_CHECKPOINTS, SCREENSHOT_SUFFIXES, ReleaseError, collect_evidence, package_release,
-    validate_jar, verify_directory,
+    sha256, validate_jar, verify_directory,
 )
 
 
@@ -358,6 +358,86 @@ class PackageReleaseTests(unittest.TestCase):
                 with mock.patch("tools.verify_cloud_smoke.verify_report", return_value=runtime):
                     with self.assertRaises(ReleaseError):
                         self.package(require_original=True)
+
+    def production_evidence(self):
+        production = self.evidence / "production"
+        production.mkdir(exist_ok=True)
+        jar_digest = sha256(self.jar)
+        runtime = {
+            "schemaVersion": 1, "status": "passed", "finalStage": 12, "minecraft": "1.21.1",
+            "runtimeMode": "production", "developmentEnvironment": False, "runtimeNamespace": "intermediary",
+            "loadedModJarSha256": jar_digest, "expectedModJarSha256": jar_digest, "loadedModVersion": "1.1.0",
+            "referenceMode": False, "assertions": ["checked"] * 30, "commands": [{"result": 1}] * 20,
+            "syntheticUninterruptedPlaybackSeconds": 6.1, "syntheticUninterruptedFinalPositionSeconds": 6.0,
+            "javaSoundClipOpened": True, "audioClockAdvanced": True, "audioWarning": None, "checkpoints": [],
+        }
+        for name, frame in zip(CHECKPOINTS, (0, 90, 30, 60)):
+            corners = {corner: {"pixels": 300, "centerX": x, "centerY": y}
+                       for corner, x, y in zip(("topLeftRed", "topRightGreen", "bottomLeftBlue", "bottomRightYellow"),
+                                               (0, 100, 0, 100), (0, 0, 100, 100))}
+            runtime["checkpoints"].append({"name": name, "frame": frame, "gpuExactMatch": True,
+                "gpuPixelsCompared": 480 * 360, "worldWidth": 480, "worldHeight": 360, "framebuffer": corners})
+            for suffix in SCREENSHOT_SUFFIXES:
+                (production / (name + suffix)).write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(100))
+        audio = {"status": "passed", "virtualSinkOutputVerified": True, "physicalAudioVerified": False,
+                 "sampleRate": 48000, "channels": 2, "syntheticStereoAgreementVerified": True, "expectedToneHz": 440,
+                 "matchingToneWindows": 70, "nonSilentWindows": 72, "capturedSeconds": 55.0}
+        (production / "smoke-report.json").write_text(json.dumps(runtime))
+        (production / "audio-output-report.json").write_text(json.dumps(audio))
+        return runtime, audio
+
+    def test_require_production_verifies_exact_jar_in_real_runtime_gate(self):
+        self.production_evidence()
+        info = self.package(require_production=True)
+        self.assertTrue(info["verification"]["productionRequired"])
+        result = info["verification"]["productionRuntime"]
+        self.assertEqual(result["loadedModJarSha256"], sha256(self.jar))
+        self.assertEqual(result["runtimeNamespace"], "intermediary")
+        with zipfile.ZipFile(self.output / "minecraft-bad-apple-1.1.0-evidence.zip") as archive:
+            self.assertIn("production/smoke-report.json", archive.namelist())
+            self.assertIn("production/audio-output-report.json", archive.namelist())
+            self.assertEqual(sum(name.startswith("production/") for name in archive.namelist()), 10)
+
+    def test_require_production_refuses_missing_or_development_or_wrong_jar_evidence(self):
+        with self.assertRaisesRegex(ReleaseError, "Production release-JAR smoke and audio evidence"):
+            self.package(require_production=True)
+        original, _ = self.production_evidence()
+        for field, value in (("runtimeMode", "development"), ("developmentEnvironment", True),
+                             ("runtimeNamespace", "named"), ("loadedModVersion", "1.0.0"),
+                             ("loadedModJarSha256", "f" * 64), ("expectedModJarSha256", "a" * 64)):
+            with self.subTest(field=field):
+                runtime = dict(original, **{field: value})
+                (self.evidence / "production/smoke-report.json").write_text(json.dumps(runtime))
+                with self.assertRaises(ReleaseError):
+                    self.package(require_production=True)
+
+    def test_require_production_refuses_incomplete_synthetic_runtime_and_missing_screenshots(self):
+        runtime, _ = self.production_evidence()
+        runtime["syntheticUninterruptedPlaybackSeconds"] = 1
+        (self.evidence / "production/smoke-report.json").write_text(json.dumps(runtime))
+        with self.assertRaisesRegex(ReleaseError, "runtime verification failed"):
+            self.package(require_production=True)
+        self.production_evidence()
+        (self.evidence / ("production/" + CHECKPOINTS[0] + "-world.png")).unlink()
+        with self.assertRaisesRegex(ReleaseError, "screenshot missing"):
+            self.package(require_production=True)
+
+    def test_require_production_requires_matching_stereo_virtual_sink(self):
+        _, original = self.production_evidence()
+        for field, value in (("status", "failed"), ("channels", 1), ("syntheticStereoAgreementVerified", False),
+                             ("expectedToneHz", 880), ("matchingToneWindows", 1), ("capturedSeconds", 1)):
+            with self.subTest(field=field):
+                audio = dict(original, **{field: value})
+                (self.evidence / "production/audio-output-report.json").write_text(json.dumps(audio))
+                with self.assertRaises(ReleaseError):
+                    self.package(require_production=True)
+
+    def test_production_evidence_allowlist_excludes_raw_media_and_other_mods(self):
+        self.production_evidence()
+        for name in ("capture.wav", "movie.bapple", "original.mp4", "badapple.jar", "private.txt"):
+            (self.evidence / "production" / name).write_bytes(b"not public")
+        selected = collect_evidence(self.evidence)
+        self.assertEqual(sum(name.startswith("production/") for name in selected), 10)
 
 
 if __name__ == "__main__":

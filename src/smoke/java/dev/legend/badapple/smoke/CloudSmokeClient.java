@@ -47,7 +47,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Isolated, opt-in development client test, excluded from the shipped mod.
+ * Isolated, opt-in client test, excluded from the shipped mod. Production-mode
+ * tests require an explicit opt-in and the exact expected release JAR digest.
  * Creates its own normal single-player world; never runs a dedicated server or
  * accepts an EULA, license, account, or multiplayer-security dialog.
  */
@@ -71,6 +72,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
     private Clip initialClip;
     private String latestWarning;
     private boolean referenceMode;
+    private boolean productionMode;
     private final Map<String, Object> fullPlayback = new LinkedHashMap<>();
     private final List<Map<String, Object>> fullSamples = new ArrayList<>();
     private final BitSet fullPresentedFrames = new BitSet();
@@ -91,7 +93,8 @@ public final class CloudSmokeClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         if (!Boolean.getBoolean("badapple.smoke")) return;
-        if (!FabricLoader.getInstance().isDevelopmentEnvironment()) {
+        productionMode = Boolean.getBoolean("badapple.smoke.production");
+        if (!FabricLoader.getInstance().isDevelopmentEnvironment() && !productionMode) {
             throw new IllegalStateException("Cloud smoke tests require an isolated development instance");
         }
         output = Path.of(Objects.requireNonNull(System.getProperty("badapple.smoke.output"),
@@ -101,6 +104,9 @@ public final class CloudSmokeClient implements ClientModInitializer {
         report.put("schemaVersion", 1);
         report.put("startedUtc", Instant.now().toString());
         report.put("referenceMode", referenceMode);
+        report.put("runtimeMode", productionMode ? "production" : "development");
+        report.put("developmentEnvironment", FabricLoader.getInstance().isDevelopmentEnvironment());
+        report.put("runtimeNamespace", FabricLoader.getInstance().getMappingResolver().getCurrentRuntimeNamespace());
         report.put("media", referenceMode ? "User-selected reference archive; provenance is documented separately"
                 : "Synthetic deterministic test fixture; NOT Bad Apple reference media");
         report.put("minecraft", "1.21.1");
@@ -141,6 +147,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
             case 0 -> {
                 if (!(client.currentScreen instanceof TitleScreen)) return;
                 Files.createDirectories(output);
+                if (productionMode) verifyProductionRuntime();
                 mod = FabricLoader.getInstance().getEntrypoints("client", ClientModInitializer.class).stream()
                         .filter(BadAppleClient.class::isInstance).map(BadAppleClient.class::cast)
                         .findFirst().orElseThrow();
@@ -827,6 +834,59 @@ public final class CloudSmokeClient implements ClientModInitializer {
         return referenceMode ? "reference.bapple" : "smoke.bapple";
     }
 
+    private void verifyProductionRuntime() throws Exception {
+        FabricLoader loader = FabricLoader.getInstance();
+        require(!loader.isDevelopmentEnvironment(), "production: development environment is disabled");
+        require("intermediary".equals(loader.getMappingResolver().getCurrentRuntimeNamespace()),
+                "production: Minecraft runtime namespace is intermediary");
+        require(!referenceMode, "production: isolated synthetic fixture only");
+        Path expectedGame = Path.of(Objects.requireNonNull(System.getProperty("badapple.smoke.expectedGameDir")))
+                .toRealPath();
+        Path game = loader.getGameDir().toRealPath();
+        require(game.equals(expectedGame) && game.endsWith(Path.of("build", "production-game")),
+                "production: designated isolated game directory");
+        require(output.toRealPath().equals(game.getParent().resolve("production-verification").toRealPath()),
+                "production: designated isolated evidence directory");
+
+        Path expectedJar = Path.of(Objects.requireNonNull(System.getProperty("badapple.smoke.expectedJar")))
+                .toRealPath();
+        String expectedDigest = Objects.requireNonNull(System.getProperty("badapple.smoke.expectedJarSha256"));
+        require(expectedDigest.matches("[0-9a-f]{64}"), "production: expected release digest is SHA-256");
+        Path actualJar = classSource(BadAppleClient.class);
+        require(Files.isRegularFile(actualJar) && actualJar.getFileName().toString().endsWith(".jar"),
+                "production: main entrypoint loaded from an actual JAR");
+        require(actualJar.equals(expectedJar), "production: actual code source is the selected release JAR");
+        String actualDigest = sha256(actualJar);
+        report.put("expectedModJarSha256", expectedDigest);
+        report.put("loadedModJarSha256", actualDigest);
+        report.put("loadedModJarPath", actualJar.toString());
+        require(actualDigest.equals(expectedDigest), "production: loaded release JAR SHA-256 matches expected artifact");
+        for (Class<?> type : List.of(MovieScreen.class, PngFrames.class, PlaybackEngine.class)) {
+            require(classSource(type).equals(actualJar), "production: " + type.getSimpleName() + " loads from same release JAR");
+        }
+        var container = loader.getModContainer("badapple").orElseThrow();
+        report.put("loadedModId", container.getMetadata().getId());
+        report.put("loadedModVersion", container.getMetadata().getVersion().getFriendlyString());
+        report.put("loadedModOriginKind", container.getOrigin().getKind().name());
+        report.put("loadedModOriginPaths", container.getOrigin().getPaths().stream().map(Path::toString).toList());
+        require(container.getOrigin().getPaths().size() == 1
+                        && container.getOrigin().getPaths().getFirst().toRealPath().equals(actualJar),
+                "production: Fabric mod origin agrees with actual loaded code source");
+        require(!classSource(CloudSmokeClient.class).equals(actualJar),
+                "production: smoke harness is a separate non-release artifact");
+    }
+
+    private static Path classSource(Class<?> type) throws Exception {
+        var source = Objects.requireNonNull(type.getProtectionDomain().getCodeSource(),
+                "Class has no verifiable code source: " + type.getName());
+        requireFileUrl(source.getLocation().getProtocol());
+        return Path.of(source.getLocation().toURI()).toRealPath();
+    }
+
+    private static void requireFileUrl(String protocol) {
+        if (!"file".equals(protocol)) throw new IllegalStateException("Expected an on-disk JAR code source, got " + protocol);
+    }
+
     private void advance(int nextStage, long delayMillis) {
         stage = nextStage;
         readyAfter = System.nanoTime() + delayMillis * 1_000_000L;
@@ -856,6 +916,19 @@ public final class CloudSmokeClient implements ClientModInitializer {
     private void finish(MinecraftClient client, Throwable failure) {
         if (finished) return;
         finished = true;
+        if (failure != null && mod != null) {
+            try {
+                PlaybackEngine live = engine();
+                if (live != null && live.warning() != null) {
+                    latestWarning = live.warning();
+                    if (!audioWarnings.contains(latestWarning)) audioWarnings.add(latestWarning);
+                }
+                MovieScreen movie = screen();
+                if (movie != null) report.put("failureDecoderError", movie.error());
+            } catch (ReflectiveOperationException diagnosticFailure) {
+                report.put("failureDiagnosticError", diagnosticFailure.toString());
+            }
+        }
         report.put("status", failure == null ? "passed" : "failed");
         report.put("finishedUtc", Instant.now().toString());
         report.put("elapsedSeconds", (System.nanoTime() - started) / 1e9);
