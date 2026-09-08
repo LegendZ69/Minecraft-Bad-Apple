@@ -1,6 +1,7 @@
 """Release packaging and immutability tests; no game or network required."""
 
 import json
+import copy
 import os
 from pathlib import Path
 import struct
@@ -227,6 +228,136 @@ class PackageReleaseTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SOURCE_DATE_EPOCH": "9999999999"}):
             with self.assertRaisesRegex(ReleaseError, "between 1970 and 2099"):
                 self.package()
+
+    def original_evidence(self):
+        reports = self.evidence / "reports"
+        reports.mkdir(exist_ok=True)
+        reference = self.evidence / "reference"
+        reference.mkdir(exist_ok=True)
+        source_url = "https://www.nicovideo.jp/watch/sm8628149"
+        source_sha, archive_sha = "a" * 64, "b" * 64
+        acquisition = {"status": "downloaded_converted_verified", "sourceUrl": source_url,
+                       "sourceSha256": source_sha, "comparisonReport": "original-source-comparison.json"}
+        comparison = {"reportVersion": 1, "ok": True, "archiveSha256": archive_sha,
+                      "video": {"width": 512, "height": 384, "frameCount": 6573, "durationMicros": 219100000},
+                      "provenance": {"recordedSourceSha256": source_sha, "recordedSourceUrl": source_url},
+                      "sourceComparison": {"status": "passed", "sourceSha256": source_sha, "framesCompared": 6573,
+                                           "sourceSha256MatchesManifest": True, "allDecodedRgbFramesEqual": True,
+                                           "allRelativeTimestampsEqual": True, "durationEqual": True, "normalizedPcmEqual": True}}
+        runtime = {"schemaVersion": 1, "status": "passed", "minecraft": "1.21.1", "referenceMode": True,
+                   "archiveSha256": archive_sha, "sourceWidth": 512, "sourceHeight": 384,
+                   "sourceFrameCount": 6573, "sourceDurationSeconds": 219.1,
+                   "javaSoundClipOpened": True, "audioClockAdvanced": True, "audioWarning": None,
+                   "fullPlayback": {"status": "passed", "uninterrupted": True}}
+        audio = {"status": "passed", "virtualSinkOutputVerified": True, "physicalAudioVerified": False,
+                 "sampleRate": 48000, "channels": 2, "capturedSeconds": 250.0,
+                 "nonSilentSecondsLeft": 210.0, "nonSilentSecondsRight": 209.0}
+        data = {"reports/reference-acquisition.json": acquisition,
+                "reports/original-source-comparison.json": comparison,
+                "reference/smoke-report.json": runtime, "reference/audio-output-report.json": audio}
+        for name, value in data.items():
+            (self.evidence / name).write_text(json.dumps(value))
+        for checkpoint in REFERENCE_CHECKPOINTS:
+            for suffix in SCREENSHOT_SUFFIXES:
+                (reference / (checkpoint + suffix)).write_bytes(b"\x89PNG\r\n\x1a\n" + b"fixture" * 20)
+        return data
+
+    def test_require_original_delegates_real_path_verification_and_records_bound_provenance(self):
+        evidence = self.original_evidence()
+        runtime = evidence["reference/smoke-report.json"]
+        # Detailed full-run runtime invariants are tested independently by the
+        # smoke verifier; this unit test checks the packager's delegation/bindings.
+        with mock.patch("tools.verify_cloud_smoke.verify_report", return_value=runtime) as verify:
+            metadata = self.package(require_original=True)
+        verify.assert_called_once_with(self.evidence / "reference/smoke-report.json", reference=True)
+        original = metadata["verification"]["originalReference"]
+        self.assertEqual(original["archiveSha256"], "b" * 64)
+        self.assertTrue(original["fullMinecraftPlaybackVerified"])
+        self.assertFalse(original["youtubeReferenceEquivalenceVerified"])
+        self.assertTrue(metadata["verification"]["originalRequired"])
+
+    def test_require_original_integrates_with_real_full_run_verifier(self):
+        from test_cloud_smoke_verifier import CloudSmokeVerifierTest
+        evidence = self.original_evidence()
+        runtime = evidence["reference/smoke-report.json"]
+        runtime["fullPlayback"] = CloudSmokeVerifierTest().full_reference_report()["fullPlayback"]
+        pixels = runtime["sourceWidth"] * runtime["sourceHeight"]
+        for sample in runtime["fullPlayback"]["samples"]:
+            sample.update(nativeWidth=runtime["sourceWidth"], nativeHeight=runtime["sourceHeight"], gpuPixelsCompared=pixels)
+        runtime["fullPlayback"]["gpuPixelsCompared"] = pixels * len(runtime["fullPlayback"]["samples"])
+        runtime.update(finalStage=12, assertions=["verified" for _ in range(30)],
+                       commands=[{"result": 1} for _ in range(24)])
+        runtime["checkpoints"] = [
+            {"name": name, "seconds": seconds, "frame": seconds * 30,
+             "gpuExactMatch": True, "gpuPixelsCompared": pixels,
+             "worldWidth": runtime["sourceWidth"], "worldHeight": runtime["sourceHeight"],
+             "framebuffer": {"grayscaleFraction": 1.0, "luminanceRange": 255,
+                             "darkPixels": 1000, "lightPixels": 1000}}
+            for name, seconds in zip(REFERENCE_CHECKPOINTS, (30, 60, 120, 60))
+        ]
+        (self.evidence / "reference/smoke-report.json").write_text(json.dumps(runtime))
+        self.assertEqual(self.package(require_original=True)["verification"]["originalReference"]["status"], "passed")
+
+    def test_require_original_cannot_package_missing_or_failed_acquisition(self):
+        with self.assertRaisesRegex(ReleaseError, "Original-reference release evidence"):
+            self.package(require_original=True)
+        data = self.original_evidence()
+        data["reports/reference-acquisition.json"]["status"] = "access_unavailable"
+        (self.evidence / "reports/reference-acquisition.json").write_text(json.dumps(data["reports/reference-acquisition.json"]))
+        with self.assertRaisesRegex(ReleaseError, "not successfully acquired"):
+            self.package(require_original=True)
+
+    def test_require_original_refuses_incomplete_pixel_timestamp_duration_or_pcm_comparison(self):
+        original = self.original_evidence()
+        for field in ("allDecodedRgbFramesEqual", "allRelativeTimestampsEqual", "durationEqual", "normalizedPcmEqual"):
+            with self.subTest(field=field):
+                value = copy.deepcopy(original["reports/original-source-comparison.json"])
+                value["sourceComparison"][field] = False
+                (self.evidence / "reports/original-source-comparison.json").write_text(json.dumps(value))
+                with self.assertRaisesRegex(ReleaseError, "every decoded RGB"):
+                    self.package(require_original=True)
+
+    def test_require_original_refuses_mixed_source_hashes_archives_and_dimensions(self):
+        baseline = self.original_evidence()
+        changes = (
+            ("reports/reference-acquisition.json", "sourceSha256", "c" * 64),
+            ("reference/smoke-report.json", "archiveSha256", "d" * 64),
+            ("reference/smoke-report.json", "sourceWidth", 480),
+            ("reference/smoke-report.json", "sourceHeight", 360),
+            ("reference/smoke-report.json", "sourceFrameCount", 6570),
+            ("reference/smoke-report.json", "sourceDurationSeconds", 219),
+        )
+        for name, field, value in changes:
+            with self.subTest(field=field):
+                for path, data in baseline.items():
+                    (self.evidence / path).write_text(json.dumps(data))
+                changed = copy.deepcopy(baseline[name])
+                changed[field] = value
+                (self.evidence / name).write_text(json.dumps(changed))
+                with self.assertRaises(ReleaseError):
+                    self.package(require_original=True)
+
+    def test_require_original_requires_runtime_full_run_and_original_screenshots(self):
+        self.original_evidence()
+        with mock.patch("tools.verify_cloud_smoke.verify_report", side_effect=ValueError("incomplete full run")):
+            with self.assertRaisesRegex(ReleaseError, "runtime/full-playback"):
+                self.package(require_original=True)
+        (self.evidence / ("reference/" + REFERENCE_CHECKPOINTS[0] + "-gpu.png")).unlink()
+        with self.assertRaisesRegex(ReleaseError, "screenshot missing"):
+            self.package(require_original=True)
+
+    def test_require_original_requires_full_stereo_capture_not_short_or_silent_channel(self):
+        evidence = self.original_evidence()
+        runtime = evidence["reference/smoke-report.json"]
+        for field, value in (("status", "failed"), ("capturedSeconds", 3), ("channels", 1),
+                             ("nonSilentSecondsLeft", 0), ("nonSilentSecondsRight", 10)):
+            with self.subTest(field=field):
+                audio = copy.deepcopy(evidence["reference/audio-output-report.json"])
+                audio[field] = value
+                (self.evidence / "reference/audio-output-report.json").write_text(json.dumps(audio))
+                with mock.patch("tools.verify_cloud_smoke.verify_report", return_value=runtime):
+                    with self.assertRaises(ReleaseError):
+                        self.package(require_original=True)
 
 
 if __name__ == "__main__":

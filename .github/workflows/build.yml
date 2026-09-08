@@ -16,6 +16,7 @@ jobs:
     env:
       LIBGL_ALWAYS_SOFTWARE: '1'
       PULSE_SINK: badapple
+      PULSE_LATENCY_MSEC: '20'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -55,7 +56,7 @@ jobs:
           ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
         run: |
           pulseaudio --start --exit-idle-time=-1
-          pactl load-module module-null-sink sink_name=badapple
+          pactl load-module module-null-sink sink_name=badapple rate=48000 channels=2 format=s16le
           parec --device=badapple.monitor --format=s16le --rate=48000 --channels=2 --file-format=wav build/captured-audio.wav &
           capture_pid=$!
           trap 'kill -INT "$capture_pid" 2>/dev/null || true' EXIT
@@ -73,20 +74,26 @@ jobs:
         run: |
           python -m pip install yt-dlp==2026.8.19
           python tools/acquire_original.py --work-dir build/reference-source --archive build/smoke-game/badapple/reference.bapple --report-dir build/cloud-verification/reports
-      - name: Verify original reference in actual Minecraft when publicly accessible
+          python -c 'import json; assert json.load(open("build/cloud-verification/reports/reference-acquisition.json"))["status"] == "downloaded_converted_verified", "Original media unavailable: release verification cannot be completed; see access report. No bypass attempted."'
+      - name: Verify complete original reference in actual Minecraft
         env:
           ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
         run: |
-          if test -f build/smoke-game/badapple/reference.bapple; then
-            timeout 480s xvfb-run -a -s '-screen 0 1280x720x24' gradle --no-daemon runSmokeClient -PsmokeReference=true 2>&1 | tee build/cloud-verification/reports/original-minecraft-client.txt
-            python tools/verify_cloud_smoke.py build/reference-verification/smoke-report.json --reference
-            cp build/reference-verification/smoke-report.json build/cloud-verification/reports/original-minecraft-report.json
-            mkdir -p build/cloud-verification/reference
-            cp build/reference-verification/*.json build/reference-verification/*.png build/cloud-verification/reference/
-          fi
+          test -f build/smoke-game/badapple/reference.bapple
+          parec --device=badapple.monitor --format=s16le --rate=48000 --channels=2 --file-format=wav build/reference-captured-audio.wav &
+          capture_pid=$!
+          trap 'kill -INT "$capture_pid" 2>/dev/null || true' EXIT
+          timeout 480s xvfb-run -a -s '-screen 0 1280x720x24' gradle --no-daemon runSmokeClient -PsmokeReference=true 2>&1 | tee build/cloud-verification/reports/original-minecraft-client.txt
+          kill -INT "$capture_pid"
+          wait "$capture_pid" || true
+          trap - EXIT
+          python tools/verify_cloud_smoke.py build/reference-verification/smoke-report.json --reference --require-audio --audio-capture build/reference-captured-audio.wav
+          cp build/reference-verification/smoke-report.json build/cloud-verification/reports/original-minecraft-report.json
+          mkdir -p build/cloud-verification/reference
+          cp build/reference-verification/*.json build/reference-verification/*.png build/cloud-verification/reference/
       - name: Package versioned release and verify checksums
         run: |
-          python tools/package_release.py --version 1.1.0 --commit "$GITHUB_SHA" --jar build/libs/minecraft-bad-apple-1.1.0.jar --output dist/v1.1.0 --evidence-dir build/cloud-verification
+          python tools/package_release.py --version 1.1.0 --commit "$GITHUB_SHA" --jar build/libs/minecraft-bad-apple-1.1.0.jar --output dist/v1.1.0 --evidence-dir build/cloud-verification --require-original
           python tools/package_release.py --verify-directory dist/v1.1.0
       - uses: actions/upload-artifact@v4
         with:
@@ -106,4 +113,11 @@ jobs:
             build/reference-verification/*.json
             build/reference-verification/*.png
             build/smoke-game/logs/latest.log
+          if-no-files-found: warn
+      - name: Preserve synthetic-only sink recording for audio diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-audio-diagnostics
+          path: build/captured-audio.wav
           if-no-files-found: warn

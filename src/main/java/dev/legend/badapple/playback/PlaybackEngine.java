@@ -205,12 +205,18 @@ public final class PlaybackEngine implements Closeable {
                         || frameLength > VideoArchive.MAX_AUDIO_BYTES / frameSize) {
                     throw new IOException("Audio must be bounded PCM WAV data under 256 MiB");
                 }
-                candidate = AudioSystem.getClip();
+                candidate = new StreamingAudioClip();
                 candidate.open(decoded);
                 audio = candidate;
             }
         } catch (Exception unavailable) {
-            if (candidate != null) candidate.close();
+            if (candidate != null) {
+                try {
+                    candidate.close();
+                } catch (RuntimeException ignored) {
+                    // Cleanup must not hide the original audio-device failure.
+                }
+            }
             warning = audioWarning(unavailable);
         }
     }

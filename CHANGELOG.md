@@ -17,6 +17,10 @@ original animation and recording, which are not distributed in these releases.
 - Correct stale audio-clock readings after backward seeks, restart, and loops;
   retain elapsed time when a stalled device falls back to silent playback. Add
   eleven injected-device regression cases, pending final CI execution.
+- Identify the inherited native Java Sound `Clip` buffer/position-reporting
+  issue, including its effect on the v1.0.0 path. A four-case cloud buffer probe
+  and low-latency adapter verification remain pending; see the
+  [source-backed diagnosis](docs/releases/v1.1.0.md#native-audio-buffering-diagnosis).
 - Document primary reference sources, distribution limits, and versioned builds.
 
 Both YouTube references remain sign-in/bot gated, so equivalence with them is not

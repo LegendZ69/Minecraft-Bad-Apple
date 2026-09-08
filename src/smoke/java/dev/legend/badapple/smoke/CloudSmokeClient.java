@@ -5,11 +5,15 @@ import dev.legend.badapple.client.BadAppleClient;
 import dev.legend.badapple.client.MovieScreen;
 import dev.legend.badapple.playback.PlaybackEngine;
 import java.lang.reflect.Field;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +69,22 @@ public final class CloudSmokeClient implements ClientModInitializer {
     private Clip initialClip;
     private String latestWarning;
     private boolean referenceMode;
+    private final Map<String, Object> fullPlayback = new LinkedHashMap<>();
+    private final List<Map<String, Object>> fullSamples = new ArrayList<>();
+    private final BitSet fullPresentedFrames = new BitSet();
+    private boolean fullPreparing;
+    private boolean fullPrepared;
+    private boolean fullRunning;
+    private boolean fullCompleted;
+    private long fullStartedNanos;
+    private long fullNextSampleNanos;
+    private long fullRenderCallbacks;
+    private long fullPreviousRenderNanos;
+    private long fullLongestRenderGapNanos;
+    private long fullPeakHeapUsedBytes;
+    private int fullFirstUploadedFrame = -1;
+    private int fullLastUploadedFrame = -1;
+    private long syntheticRunStartedNanos;
 
     @Override
     public void onInitializeClient() {
@@ -104,9 +124,10 @@ public final class CloudSmokeClient implements ClientModInitializer {
         });
         // END runs after the production mod's LAST callback has drawn its quad.
         WorldRenderEvents.END.register(context -> {
-            if (finished || capturePending == null) return;
+            if (finished) return;
             try {
-                capture(MinecraftClient.getInstance());
+                if (fullPreparing || fullRunning) observeFullPlayback(MinecraftClient.getInstance());
+                if (capturePending != null) capture(MinecraftClient.getInstance());
             } catch (Throwable error) {
                 finish(MinecraftClient.getInstance(), error);
             }
@@ -121,8 +142,10 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 mod = FabricLoader.getInstance().getEntrypoints("client", ClientModInitializer.class).stream()
                         .filter(BadAppleClient.class::isInstance).map(BadAppleClient.class::cast)
                         .findFirst().orElseThrow();
-                require(Files.isRegularFile(FabricLoader.getInstance().getGameDir()
-                        .resolve("badapple/" + archiveName())), "Selected smoke archive exists");
+                Path selectedArchive = FabricLoader.getInstance().getGameDir().resolve("badapple/" + archiveName());
+                require(Files.isRegularFile(selectedArchive), "Selected smoke archive exists");
+                report.put("archiveSha256", sha256(selectedArchive));
+                report.put("archiveSizeBytes", Files.size(selectedArchive));
                 report.put("renderer", GL11.glGetString(GL11.GL_RENDERER));
                 report.put("openGlVersion", GL11.glGetString(GL11.GL_VERSION));
                 CreateWorldScreen.create(client, client.currentScreen);
@@ -181,9 +204,33 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 report.put("javaSoundClipOpened", initialClip != null && initialClip.isOpen());
                 latestWarning = engine().warning();
                 audioSnapshot("initial-archive-opened");
+                if (!referenceMode) {
+                    command(client, "badapple loop false");
+                    syntheticRunStartedNanos = System.nanoTime();
+                    command(client, "badapple restart");
+                    advance(19, 0);
+                    return;
+                }
                 command(client, "badapple pause");
                 pausedPosition = engine().positionSeconds();
                 audioPosition = initialClip == null ? -1 : initialClip.getMicrosecondPosition();
+                advance(5, 650);
+            }
+            case 19 -> {
+                require(engine().warning() == null && initialClip != null && initialClip.isOpen(),
+                        "Uninterrupted six-second synthetic preflight retains real audio without fallback");
+                if (engine().isPlaying()) return;
+                double elapsed = (System.nanoTime() - syntheticRunStartedNanos) / 1e9;
+                require(Math.abs(engine().positionSeconds() - engine().durationSeconds()) <= 0.05
+                                && elapsed >= engine().durationSeconds() - 0.2
+                                && elapsed <= engine().durationSeconds() + 5,
+                        "Synthetic preflight plays its entire six seconds and stops naturally");
+                report.put("syntheticUninterruptedPlaybackSeconds", elapsed);
+                report.put("syntheticUninterruptedFinalPositionSeconds", engine().positionSeconds());
+                audioSnapshot("synthetic-uninterrupted-natural-end");
+                command(client, "badapple pause");
+                pausedPosition = engine().positionSeconds();
+                audioPosition = initialClip.getMicrosecondPosition();
                 advance(5, 650);
             }
             case 5 -> {
@@ -200,8 +247,12 @@ public final class CloudSmokeClient implements ClientModInitializer {
             }
             case 6 -> {
                 if (capturePending != null) return;
+                // ALSA may report the old queued-buffer position immediately
+                // after a backward seek. Compare against the requested paused
+                // timeline target, not that stale device reading.
+                audioPosition = (long) (engine().positionSeconds() * 1_000_000);
+                report.put("audioResumeTargetMicros", audioPosition);
                 command(client, "badapple resume");
-                audioPosition = initialClip == null ? -1 : initialClip.getMicrosecondPosition();
                 advance(7, 1100);
             }
             case 7 -> {
@@ -209,7 +260,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 require(engine().isPlaying() && engine().positionSeconds() > (referenceMode ? 30.5 : 0.5),
                         "Resume advances playback clock and frame selection");
                 report.put("audioClockAdvanced", initialClip != null
-                        && initialClip.getMicrosecondPosition() > audioPosition + 200000);
+                        && initialClip.getMicrosecondPosition() > audioPosition + 200000 && engine().warning() == null);
                 if (Boolean.getBoolean("badapple.smoke.requireAudio")) {
                     require(Boolean.TRUE.equals(report.get("audioClockAdvanced")) && engine().warning() == null,
                             "Real Java Sound output clock advances without fallback");
@@ -299,8 +350,68 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 }
                 require(referenceMode ? Math.abs(engine().positionSeconds() - 60) < 0.002
                         : engine().currentFrameIndex() == 60, "Reload creates working decoder after cleanup");
+                if (referenceMode) {
+                    command(client, "badapple loop false");
+                    command(client, "badapple seek 0");
+                    command(client, "badapple place native");
+                    fullPreparing = true;
+                    advance(17, 0);
+                    return;
+                }
                 latestWarning = engine().warning();
                 command(client, "badapple unload");
+                finish(client, null);
+            }
+            case 17 -> {
+                if (!fullPrepared) return;
+                PlaybackEngine player = engine();
+                require(player != null && field(player, "audio", Clip.class) != null,
+                        "Full reference playback has a real Java Sound clip");
+                fullStartedNanos = System.nanoTime();
+                command(client, "badapple restart");
+                fullPlayback.put("status", "running");
+                fullPlayback.put("uninterrupted", true);
+                fullPlayback.put("durationSeconds", player.durationSeconds());
+                fullPlayback.put("frameCount", player.metadata().frameCount());
+                fullPlayback.put("nativeWidth", player.width());
+                fullPlayback.put("nativeHeight", player.height());
+                fullPlayback.put("worldWidth", field(screen(), "width", Double.class));
+                fullPlayback.put("worldHeight", field(screen(), "height", Double.class));
+                fullPlayback.put("sampleIntervalSeconds", 5);
+                fullPlayback.put("startedAtPositionSeconds", player.positionSeconds());
+                fullPlayback.put("startingCommandIndex", commands.size());
+                fullPlayback.put("initialFramePreloadedAtStart", true);
+                fullPlayback.put("samples", fullSamples);
+                fullPlayback.put("notes", "No seek, pause, or other command during the complete playthrough. "
+                        + "Distinct uploaded frames are counted only from actual world-render callbacks after restart; "
+                        + "the initially preloaded frame zero is verified separately. Software rendering may skip source frames. "
+                        + "GPU comparisons verify the actually uploaded frame, which may lag timeline selection. "
+                        + "Initial raw audio position may still reflect the previous seek while the device settles. "
+                        + "Physical speakers and every original frame being displayed are not assumed.");
+                report.put("fullPlayback", fullPlayback);
+                fullRunning = true;
+                fullNextSampleNanos = fullStartedNanos + 5_000_000_000L;
+                sampleFullPlayback(0, false);
+                advance(18, 0);
+            }
+            case 18 -> {
+                require(client.world != null && client.player != null && !client.isPaused(),
+                        "Full reference playback remains connected and unpaused");
+                PlaybackEngine player = engine();
+                require(player != null && screen() != null && screen().error() == null,
+                        "Full reference playback retains a healthy movie and renderer");
+                require(player.warning() == null && field(player, "audio", Clip.class) != null,
+                        "Full reference playback never falls back to silent timing");
+                fullPeakHeapUsedBytes = Math.max(fullPeakHeapUsedBytes, heapUsedBytes());
+                if (!fullCompleted) return;
+                require(fullSamples.size() >= (int) Math.floor(player.durationSeconds() / 5) + 1,
+                        "Full reference playback contains bounded five-second evidence samples through the end");
+                require(!player.isPlaying() && Math.abs(player.positionSeconds() - player.durationSeconds()) <= 0.05
+                                && fullLastUploadedFrame == player.metadata().frameCount() - 1,
+                        "Full reference playback naturally reaches the exact final source frame and stopped state");
+                latestWarning = player.warning();
+                command(client, "badapple unload");
+                stage = 12;
                 finish(client, null);
             }
             default -> throw new AssertionError("Unknown smoke stage " + stage);
@@ -317,6 +428,144 @@ public final class CloudSmokeClient implements ClientModInitializer {
             }
         }
         return null;
+    }
+
+    private void observeFullPlayback(MinecraftClient client) throws Exception {
+        PlaybackEngine player = engine();
+        MovieScreen movie = screen();
+        if (player == null || movie == null) return;
+        require(movie.error() == null, "Full reference playback renderer has no terminal error");
+        NativeImageBackedTexture texture = field(movie, "texture", NativeImageBackedTexture.class);
+        if (texture == null) return;
+        int uploaded = uploadedFrame(movie);
+        if (fullPreparing) {
+            if (uploaded != 0 || player.currentFrameIndex() != 0) return;
+            // Frame zero has actually been drawn at native world scale before
+            // the uninterrupted run starts, avoiding an asynchronous decode race.
+            fullPreparing = false;
+            fullPrepared = true;
+            return;
+        }
+        if (uploaded < 0) return;
+        long now = System.nanoTime();
+        fullRenderCallbacks++;
+        if (fullPreviousRenderNanos != 0) {
+            fullLongestRenderGapNanos = Math.max(fullLongestRenderGapNanos, now - fullPreviousRenderNanos);
+        }
+        fullPreviousRenderNanos = now;
+        require(uploaded >= fullLastUploadedFrame, "Uninterrupted reference playback never rewinds uploaded frames");
+        fullPresentedFrames.set(uploaded);
+        if (fullFirstUploadedFrame < 0) fullFirstUploadedFrame = uploaded;
+        fullLastUploadedFrame = uploaded;
+        boolean ended = !player.isPlaying() && player.positionSeconds() >= player.durationSeconds();
+        if (ended && uploaded == player.metadata().frameCount() - 1) {
+            sampleFullPlayback(uploaded, true);
+            fullRunning = false;
+            fullCompleted = true;
+            completeFullPlayback(player);
+        } else if (now >= fullNextSampleNanos) {
+            sampleFullPlayback(uploaded, false);
+            // Keep a bounded sample list and preserve a real long gap in the
+            // evidence rather than fabricating catch-up observations.
+            do {
+                fullNextSampleNanos += 5_000_000_000L;
+            } while (fullNextSampleNanos <= now);
+        }
+    }
+
+    private void sampleFullPlayback(int uploaded, boolean ended) throws Exception {
+        PlaybackEngine player = engine();
+        MovieScreen movie = screen();
+        Clip clip = field(player, "audio", Clip.class);
+        require(clip != null, "Full reference sample retains its Java Sound device");
+        Map<String, Object> sample = new LinkedHashMap<>();
+        sample.put("elapsedSeconds", (System.nanoTime() - fullStartedNanos) / 1e9);
+        sample.put("positionSeconds", player.positionSeconds());
+        sample.put("audioPositionSeconds", clip.getMicrosecondPosition() / 1_000_000.0);
+        sample.put("requestedFrame", player.currentFrameIndex());
+        sample.put("uploadedFrame", uploaded);
+        sample.put("playing", player.isPlaying());
+        sample.put("clipRunning", clip.isRunning());
+        sample.put("audioDriving", field(player, "audioDriving", Boolean.class));
+        sample.put("warning", player.warning());
+        sample.put("heapUsedBytes", heapUsedBytes());
+        sample.put("nativeWidth", player.width());
+        sample.put("nativeHeight", player.height());
+        NativeImageBackedTexture texture = field(movie, "texture", NativeImageBackedTexture.class);
+        int previousTexture = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
+        try (NativeImage source = NativeImage.read(player.archive().readFrame(uploaded));
+                NativeImage gpu = new NativeImage(player.width(), player.height(), false)) {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, texture.getGlId());
+            gpu.loadFromTextureImage(0, false);
+            for (int y = 0; y < source.getHeight(); y++) {
+                for (int x = 0; x < source.getWidth(); x++) {
+                    if (source.getColor(x, y) != gpu.getColor(x, y)) {
+                        throw new AssertionError("Full reference GPU sample differs at source frame "
+                                + uploaded + " pixel " + x + "," + y);
+                    }
+                }
+            }
+            sample.put("gpuExactMatch", true);
+            sample.put("gpuPixelsCompared", player.width() * player.height());
+        } finally {
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, previousTexture);
+        }
+        fullPeakHeapUsedBytes = Math.max(fullPeakHeapUsedBytes, ((Number) sample.get("heapUsedBytes")).longValue());
+        fullSamples.add(sample);
+        LOGGER.info("BADAPPLE_FULL_REFERENCE_SAMPLE elapsed={} position={} uploadedFrame={} ended={}",
+                sample.get("elapsedSeconds"), sample.get("positionSeconds"), uploaded, ended);
+    }
+
+    private void completeFullPlayback(PlaybackEngine player) throws Exception {
+        Clip clip = field(player, "audio", Clip.class);
+        int frameCount = player.metadata().frameCount();
+        int observed = fullPresentedFrames.cardinality();
+        fullPlayback.put("status", "passed");
+        fullPlayback.put("elapsedSeconds", (System.nanoTime() - fullStartedNanos) / 1e9);
+        fullPlayback.put("finalPositionSeconds", player.positionSeconds());
+        fullPlayback.put("finalFrame", player.currentFrameIndex());
+        fullPlayback.put("finalPlaying", player.isPlaying());
+        fullPlayback.put("finalClipRunning", clip != null && clip.isRunning());
+        fullPlayback.put("audioFallback", player.warning() != null || clip == null);
+        fullPlayback.put("endingCommandIndex", commands.size());
+        fullPlayback.put("renderCallbacks", fullRenderCallbacks);
+        fullPlayback.put("uniqueUploadedFrames", observed);
+        fullPlayback.put("frameCoverageFraction", (double) observed / frameCount);
+        fullPlayback.put("skippedSourceFrames", frameCount - observed);
+        fullPlayback.put("firstUploadedFrame", fullFirstUploadedFrame);
+        fullPlayback.put("lastUploadedFrame", fullLastUploadedFrame);
+        fullPlayback.put("meanRenderCallbacksPerSecond", fullRenderCallbacks / ((System.nanoTime() - fullStartedNanos) / 1e9));
+        fullPlayback.put("longestRenderGapSeconds", fullLongestRenderGapNanos / 1e9);
+        fullPlayback.put("gpuComparisons", fullSamples.size());
+        fullPlayback.put("gpuPixelsCompared", (long) fullSamples.size() * player.width() * player.height());
+        fullPlayback.put("peakHeapUsedBytes", fullPeakHeapUsedBytes);
+        fullPlayback.put("maxObservedHeapBytes", Runtime.getRuntime().maxMemory());
+        LOGGER.info("BADAPPLE_FULL_REFERENCE_COMPLETED uniqueUploadedFrames={}/{} callbacks={} samples={}",
+                observed, frameCount, fullRenderCallbacks, fullSamples.size());
+    }
+
+    private static int uploadedFrame(MovieScreen movie) throws ReflectiveOperationException {
+        Object decoder = field(movie, "decoder", Object.class);
+        synchronized (decoder) {
+            return field(decoder, "delivered", Integer.class);
+        }
+    }
+
+    private static long heapUsedBytes() {
+        Runtime runtime = Runtime.getRuntime();
+        return runtime.totalMemory() - runtime.freeMemory();
+    }
+
+    private static String sha256(Path path) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream stream = Files.newInputStream(path)) {
+            byte[] buffer = new byte[64 * 1024];
+            int count;
+            while ((count = stream.read(buffer)) >= 0) {
+                if (count > 0) digest.update(buffer, 0, count);
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     private void command(MinecraftClient client, String command) throws Exception {

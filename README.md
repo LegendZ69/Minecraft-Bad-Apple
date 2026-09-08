@@ -80,6 +80,12 @@ In a paused single-player game, playback automatically pauses and resumes with t
 
 Audio uses the system’s Java Sound output, outside Minecraft’s volume sliders and positional sound system. Use system/application volume to adjust it. If no compatible audio device is available, the mod explicitly reports silent playback and uses a monotonic clock. Pause, seeking, and looping remain available.
 
+On Linux with the ALSA PulseAudio plugin, launch Minecraft with
+`PULSE_LATENCY_MSEC=20` in its environment. This is the configuration exercised by
+the cloud audio tests; the default PulseAudio buffering can delay starts/seeks.
+The mod uses a 20 ms Java Sound streaming buffer rather than the standard
+one-second native clip buffer. It does not modify your system audio settings.
+
 PNG decoding happens on a background worker with a small prefetch buffer; textures are uploaded on the render thread. This avoids loading all frames into memory. The PCM audio clip is loaded in memory, capped at 256 MiB (about 23 minutes at the chosen format). Archives also enforce dimension, timestamp, frame-count, and entry-size limits.
 
 For fidelity, cap Minecraft at least as high as the source frame rate, face the screen squarely, use enough screen area on your monitor, and disable shaders/postprocessing that alter the picture. Shader packs and third-party renderers require separate compatibility testing.

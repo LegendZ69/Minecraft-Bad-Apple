@@ -13,6 +13,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -196,6 +197,100 @@ def validate_smoke(evidence: dict[str, bytes]) -> dict:
     return report
 
 
+def validate_original(evidence: dict[str, bytes], evidence_dir: Path | None) -> dict:
+    """Fail closed unless acquisition, source pixels, full runtime and sink agree."""
+    required = ("reports/reference-acquisition.json", "reports/original-source-comparison.json",
+                "reference/smoke-report.json", "reference/audio-output-report.json")
+    for name in required:
+        require(name in evidence, f"Original-reference release evidence is required: {name}")
+    require(evidence_dir is not None, "Original-reference evidence directory is required.")
+    acquisition, comparison, runtime, audio = (read_json(evidence[name], name) for name in required)
+    original_url = "https://www.nicovideo.jp/watch/sm8628149"
+    require(acquisition.get("status") == "downloaded_converted_verified"
+            and acquisition.get("sourceUrl") == original_url,
+            "Original creator reference was not successfully acquired and verified.")
+    require(acquisition.get("comparisonReport") == "original-source-comparison.json",
+            "Original acquisition points to a different comparison report.")
+    require(comparison.get("reportVersion") == 1 and comparison.get("ok") is True,
+            "Original source comparison is missing a successful schema-1 result.")
+    source = comparison.get("sourceComparison", {})
+    provenance = comparison.get("provenance", {})
+    video = comparison.get("video", {})
+    require(all(isinstance(value, dict) for value in (source, provenance, video)),
+            "Original comparison source, provenance or video fields are malformed.")
+    require(source.get("status") == "passed" and all(source.get(field) is True for field in (
+        "allDecodedRgbFramesEqual", "allRelativeTimestampsEqual", "durationEqual",
+        "normalizedPcmEqual", "sourceSha256MatchesManifest")),
+        "Original source must match every decoded RGB frame, timestamp, duration and normalized PCM sample.")
+    source_digest = source.get("sourceSha256")
+    archive_digest = comparison.get("archiveSha256")
+    require(isinstance(source_digest, str) and bool(re.fullmatch(r"[0-9a-f]{64}", source_digest))
+            and acquisition.get("sourceSha256") == source_digest
+            and provenance.get("recordedSourceSha256") == source_digest,
+            "Original acquisition, comparison and archive-manifest source hashes must match.")
+    require(provenance.get("recordedSourceUrl") == original_url,
+            "Original archive manifest names a different reference URL.")
+    require(isinstance(archive_digest, str) and bool(re.fullmatch(r"[0-9a-f]{64}", archive_digest))
+            and runtime.get("archiveSha256") == archive_digest,
+            "Original runtime archive SHA-256 does not match the exhaustively compared archive.")
+    for field in ("width", "height", "frameCount", "durationMicros"):
+        require(type(video.get(field)) is int and video[field] > 0,
+                f"Original comparison has invalid video {field}.")
+    require(source.get("framesCompared") == video["frameCount"],
+            "Original source comparison did not cover every frame.")
+    require(runtime.get("sourceWidth") == video["width"] and runtime.get("sourceHeight") == video["height"]
+            and runtime.get("sourceFrameCount") == video["frameCount"],
+            "Original runtime dimensions or frame count differ from the compared archive.")
+    duration = video["durationMicros"] / 1_000_000
+    runtime_duration = runtime.get("sourceDurationSeconds")
+    require(type(runtime_duration) in (int, float) and math.isfinite(runtime_duration)
+            and abs(runtime_duration - duration) <= 0.00001,
+            "Original runtime duration differs from the compared archive.")
+    for name in REFERENCE_CHECKPOINTS:
+        for suffix in SCREENSHOT_SUFFIXES:
+            relative = "reference/" + name + suffix
+            require(relative in evidence, f"Original reference screenshot missing: {relative}")
+            require((evidence_dir / relative).read_bytes() == evidence[relative],
+                    "Original reference screenshot changed during evidence collection.")
+    runtime_path = evidence_dir / "reference/smoke-report.json"
+    require(runtime_path.read_bytes() == evidence["reference/smoke-report.json"],
+            "Original runtime report changed during evidence collection.")
+    # Use the same independent runtime gate as CI, on the actual evidence path.
+    # Its reference path includes exhaustive checkpoints and the uninterrupted
+    # fullPlayback report; unit tests of that verifier own its detailed schema.
+    if __package__ in (None, ""):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from tools.verify_cloud_smoke import verify_report
+        verified = verify_report(runtime_path, reference=True)
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise ReleaseError("Original Minecraft reference runtime/full-playback verification failed.") from exc
+    require(verified == runtime, "Original runtime report changed during verification.")
+    full = runtime.get("fullPlayback")
+    require(isinstance(full, dict) and full.get("status") == "passed" and full.get("uninterrupted") is True,
+            "Original reference requires successful uninterrupted full-duration Minecraft playback.")
+    require(runtime.get("javaSoundClipOpened") is True and runtime.get("audioClockAdvanced") is True
+            and runtime.get("audioWarning") is None and not runtime.get("audioWarnings"),
+            "Original Minecraft playback audio failed or fell back to a silent clock.")
+    require(audio.get("status") == "passed" and audio.get("virtualSinkOutputVerified") is True
+            and audio.get("sampleRate") == 48000 and audio.get("channels") == 2
+            and audio.get("physicalAudioVerified") is False,
+            "Original reference requires a passed real 48-kHz stereo virtual-sink output report.")
+    captured = audio.get("capturedSeconds")
+    require(type(captured) in (int, float) and math.isfinite(captured) and captured >= duration,
+            "Original audio capture does not cover the complete source duration.")
+    for field in ("nonSilentSecondsLeft", "nonSilentSecondsRight"):
+        seconds = audio.get(field)
+        require(type(seconds) in (int, float) and math.isfinite(seconds)
+                and 0.8 * duration <= seconds <= captured + 0.1,
+                "Original reference must reach both stereo output channels for at least 80% of its duration.")
+    return {"status": "passed", "sourceUrl": original_url, "sourceSha256": source_digest,
+            "archiveSha256": archive_digest, "frameCount": video["frameCount"],
+            "width": video["width"], "height": video["height"], "durationSeconds": duration,
+            "fullMinecraftPlaybackVerified": True, "stereoVirtualSinkOutputVerified": True,
+            "youtubeReferenceEquivalenceVerified": False, "physicalAudioVerified": False}
+
+
 def zip_deterministic(destination: Path, members: dict[str, bytes]) -> None:
     with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, data in sorted(members.items()):
@@ -220,7 +315,7 @@ def timestamp() -> str:
 
 def package_release(*, version: str, commit: str, jar: Path, output: Path,
                     evidence_dir: Path | None = None, no_smoke_required: bool = False,
-                    source_dir: Path | None = None) -> dict:
+                    source_dir: Path | None = None, require_original: bool = False) -> dict:
     valid_version(version)
     require(bool(re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit)), "Commit must be a full 40- or 64-character hexadecimal Git SHA.")
     require(not no_smoke_required or version == "1.0.0", "--no-smoke-required is only allowed for the historical 1.0.0 baseline.")
@@ -229,6 +324,7 @@ def package_release(*, version: str, commit: str, jar: Path, output: Path,
     validate_jar(jar, version)
     evidence = collect_evidence(evidence_dir)
     smoke = None if no_smoke_required else validate_smoke(evidence)
+    original = validate_original(evidence, evidence_dir) if require_original else None
     files = ["README.md", "tools/prepare_video.py", "tools/verify_archive.py", "tools/generate_fixture.py"]
     for name in files:
         require((source / name).is_file() and not (source / name).is_symlink(), f"Portable bundle source is missing: {name}")
@@ -257,8 +353,10 @@ def package_release(*, version: str, commit: str, jar: Path, output: Path,
         "productionJar": {"name": jar_name, "sha256": sha256(jar)},
         "releaseAssets": sorted(assets), "sourceMediaIncluded": False,
         "verification": {"smokeStatus": "passed" if smoke else "not-run-historical-baseline",
+                         "originalRequired": require_original, "originalReference": original,
                          "physicalAudioVerified": False,
-                         "scope": "Synthetic cloud evidence does not establish reference-media provenance or physical audio fidelity."},
+                         "scope": ("Original-source acquisition, exhaustive local-source comparison, uninterrupted Minecraft playback and stereo virtual-sink output verified; user YouTube equivalence and physical speakers remain unverified."
+                                   if original else "Synthetic cloud evidence does not establish reference-media provenance or physical audio fidelity.")},
         "evidence": [{"path": name, "sha256": digest_bytes(data), "bytes": len(data)}
                      for name, data in sorted(evidence.items())],
         "portableSources": [{"path": name, "sha256": digest_bytes(data)} for name, data in sorted(portable.items())],
@@ -330,17 +428,19 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--no-smoke-required", action="store_true", help="historical 1.0.0 baseline only")
+    parser.add_argument("--require-original", action="store_true", help="require acquired original, exhaustive source comparison, full Minecraft playback and stereo output evidence")
     parser.add_argument("--verify-directory", type=Path, help="verify all existing release assets without modifying them")
     args = parser.parse_args()
     try:
         if args.verify_directory:
-            require(not any([args.version, args.commit, args.jar, args.output, args.evidence_dir, args.no_smoke_required]),
+            require(not any([args.version, args.commit, args.jar, args.output, args.evidence_dir, args.no_smoke_required, args.require_original]),
                     "--verify-directory cannot be combined with packaging options.")
             result = verify_directory(args.verify_directory)
         else:
             require(all([args.version, args.commit, args.jar, args.output]), "Packaging requires --version, --commit, --jar, and --output.")
             result = package_release(version=args.version, commit=args.commit, jar=args.jar, output=args.output,
-                                     evidence_dir=args.evidence_dir, no_smoke_required=args.no_smoke_required)
+                                     evidence_dir=args.evidence_dir, no_smoke_required=args.no_smoke_required,
+                                     require_original=args.require_original)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except (ReleaseError, OSError, ValueError) as exc:
