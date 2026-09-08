@@ -13,6 +13,9 @@ import java.util.function.LongSupplier;
 
 /** Audio-led playback with a monotonic silent fallback. All public methods are thread safe. */
 public final class PlaybackEngine implements Closeable {
+    private static final long AUDIO_CLOCK_TOLERANCE_MICROS = 100_000;
+    private static final long AUDIO_SEEK_TOLERANCE_MICROS = 1000;
+    private static final long AUDIO_STALL_TIMEOUT_NANOS = 2_000_000_000L;
     private final VideoArchive archive;
     private final Timeline timeline;
     private final LongSupplier nanoClock;
@@ -24,6 +27,9 @@ public final class PlaybackEngine implements Closeable {
     private String warning;
     private long lastAudioPosition;
     private long lastAudioAdvanceNanos;
+    private long audioStartPositionMicros;
+    private long audioStartNanos;
+    private boolean audioSeekPending;
 
     public static PlaybackEngine open(Path path) throws IOException {
         return new PlaybackEngine(VideoArchive.open(path), System::nanoTime, true);
@@ -35,6 +41,12 @@ public final class PlaybackEngine implements Closeable {
         this.timeline = new Timeline(archive.metadata().durationMicros(),
                 archive.metadata().frameTimestampsMicros(), nanoClock);
         if (initializeAudio && archive.metadata().audio() != null) loadAudio();
+    }
+
+    /** Device injection keeps clock regressions deterministic without a physical audio device. */
+    PlaybackEngine(VideoArchive archive, LongSupplier nanoClock, Clip audio) {
+        this(archive, nanoClock, false);
+        this.audio = audio;
     }
 
     public VideoArchive archive() {
@@ -88,14 +100,30 @@ public final class PlaybackEngine implements Closeable {
         requireOpen();
         if (audioDriving && audio != null) {
             try {
-                long position = Math.max(lastAudioPosition, audio.getMicrosecondPosition());
-                if (position > lastAudioPosition) lastAudioAdvanceNanos = nanoClock.getAsLong();
-                lastAudioPosition = position;
-                timeline.seekMicros(Math.min(position, timeline.durationMicros()));
-                if (position >= audio.getMicrosecondLength() || audio.getFramePosition() >= audio.getFrameLength()) {
+                long now = nanoClock.getAsLong();
+                long rawPosition = audio.getMicrosecondPosition();
+                long elapsedMicros = Math.max(0, now - audioStartNanos) / 1000;
+                // DirectClip may expose the old device position while a seek is being applied.
+                // Never latch it as a new clock origin, or a backward seek can remain stuck at
+                // the previous timestamp. The elapsed-time bound also rejects buffered jumps.
+                long tolerance = audioSeekPending ? AUDIO_SEEK_TOLERANCE_MICROS : AUDIO_CLOCK_TOLERANCE_MICROS;
+                boolean plausible = rawPosition >= Math.max(0, audioStartPositionMicros - AUDIO_SEEK_TOLERANCE_MICROS)
+                        && rawPosition <= audioStartPositionMicros + elapsedMicros + tolerance;
+                if (plausible) {
+                    audioSeekPending = false;
+                    if (rawPosition > lastAudioPosition) {
+                        lastAudioPosition = rawPosition;
+                        lastAudioAdvanceNanos = now;
+                    }
+                }
+                timeline.seekMicros(Math.min(lastAudioPosition, timeline.durationMicros()));
+                if (!audioSeekPending && plausible && lastAudioPosition >= audio.getMicrosecondLength()) {
                     // The WAV may finish slightly before the final video frame; continue on the wall clock.
+                    // Do not mix in a separately read frame position, which can belong to an old seek.
                     audioDriving = false;
-                } else if (nanoClock.getAsLong() - lastAudioAdvanceNanos > 2_000_000_000L) {
+                } else if (now - lastAudioAdvanceNanos > AUDIO_STALL_TIMEOUT_NANOS) {
+                    // Recover elapsed time rather than silently losing the entire stall interval.
+                    timeline.seekMicros(lastAudioPosition + (now - lastAudioAdvanceNanos) / 1000);
                     disableAudio(new IOException("audio device stopped advancing"));
                 }
             } catch (RuntimeException error) {
@@ -191,13 +219,19 @@ public final class PlaybackEngine implements Closeable {
         if (audio == null) return;
         try {
             audio.stop();
+            audio.flush();
             if (positionMicros >= audio.getMicrosecondLength()) {
                 audioDriving = false;
                 return;
             }
             audio.setMicrosecondPosition(positionMicros);
-            lastAudioPosition = audio.getMicrosecondPosition();
-            lastAudioAdvanceNanos = nanoClock.getAsLong();
+            // setMicrosecondPosition need not be reflected in the native position immediately.
+            // The requested target, not an immediate read-back, is the only safe seek origin.
+            lastAudioPosition = positionMicros;
+            audioStartPositionMicros = positionMicros;
+            audioStartNanos = nanoClock.getAsLong();
+            lastAudioAdvanceNanos = audioStartNanos;
+            audioSeekPending = true;
             audioDriving = true;
             audio.start();
         } catch (RuntimeException error) {
@@ -207,6 +241,7 @@ public final class PlaybackEngine implements Closeable {
 
     private void stopAudio() {
         audioDriving = false;
+        audioSeekPending = false;
         if (audio == null) return;
         try {
             audio.stop();
@@ -217,6 +252,7 @@ public final class PlaybackEngine implements Closeable {
 
     private void disableAudio(Exception error) {
         audioDriving = false;
+        audioSeekPending = false;
         warning = audioWarning(error);
         if (audio != null) {
             try {

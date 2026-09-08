@@ -1,0 +1,118 @@
+name: Publish verified versioned releases
+
+on:
+  workflow_run:
+    workflows: ['Build and verify']
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verified-release-publication
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download exact successful v1.1.0 build
+        uses: actions/download-artifact@v4
+        with:
+          name: minecraft-bad-apple-v1.1.0
+          path: dist/v1.1.0
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Verify artifact identity and checksums
+        env:
+          EXPECTED_BUILD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python tools/package_release.py --verify-directory dist/v1.1.0
+          python -c 'import json,os; assert json.load(open("dist/v1.1.0/build-info.json"))["commit"] == os.environ["EXPECTED_BUILD_COMMIT"]'
+      - name: Reuse an existing immutable baseline release on retries
+        id: baseline
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from tools.publish_release import find_release, gh, check_tag, require
+          from tools.package_release import verify_directory
+          release = find_release('v1.0.0')
+          if release is not None:
+              commit = '2ec4c20d237a3f3f5d40bd02ffadf545229fc50e'
+              check_tag('v1.0.0', commit, allow_missing=release['draft'])
+              if release['draft']:
+                  require(release['target_commitish'] == commit, 'Existing baseline draft targets another commit.')
+              destination = Path('dist/v1.0.0')
+              destination.mkdir(parents=True)
+              if release['draft']:
+                  # Reuse byte-identical packaged assets after an interrupted upload.
+                  # A missing recovery artifact is an explicit stop, never a rebuild.
+                  gh(['run', 'download', os.environ['GITHUB_RUN_ID'], '--repo', os.environ['GH_REPO'],
+                      '--name', 'immutable-baseline-v1.0.0', '--dir', str(destination)])
+              else:
+                  gh(['release', 'download', 'v1.0.0', '--repo', os.environ['GH_REPO'], '--dir', str(destination)])
+              metadata = verify_directory(destination)
+              require(metadata['version'] == '1.0.0' and metadata['commit'] == commit, 'Existing baseline provenance differs.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('build=' + str(release is None).lower() + '\n')
+          PY
+      - name: Check out immutable v1.0.0 source
+        if: steps.baseline.outputs.build == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: 2ec4c20d237a3f3f5d40bd02ffadf545229fc50e
+          path: legacy
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        if: steps.baseline.outputs.build == 'true'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.baseline.outputs.build == 'true'
+        with:
+          gradle-version: '8.8'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        if: steps.baseline.outputs.build == 'true'
+      - name: Rebuild and test documented historical v1.0.0
+        if: steps.baseline.outputs.build == 'true'
+        run: |
+          mkdir -p build/baseline-evidence/reports
+          (cd legacy && python -m unittest discover -s tests -v) 2>&1 | tee build/baseline-evidence/reports/python-tests.txt
+          gradle --no-daemon -p legacy build 2>&1 | tee build/baseline-evidence/reports/gradle-build.txt
+          cp legacy/build/test-results/test/TEST-*.xml build/baseline-evidence/reports/
+          python tools/package_release.py --version 1.0.0 --commit 2ec4c20d237a3f3f5d40bd02ffadf545229fc50e --jar legacy/build/libs/minecraft-bad-apple-1.0.0.jar --output dist/v1.0.0 --evidence-dir build/baseline-evidence --no-smoke-required
+      - name: Preserve exact historical assets for safe publication retries
+        if: steps.baseline.outputs.build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: immutable-baseline-v1.0.0
+          path: dist/v1.0.0/*
+          if-no-files-found: error
+      - name: Publish and re-download v1.0.0 to verify every asset
+        run: python tools/publish_release.py --directory dist/v1.0.0 --notes docs/releases/v1.0.0.md --report build/v1.0.0-publication.json
+      - name: Publish and re-download v1.1.0 to verify every asset
+        run: python tools/publish_release.py --directory dist/v1.1.0 --notes docs/releases/v1.1.0.md --report build/v1.1.0-publication.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-publication-verification
+          path: build/v*-publication.json
+          if-no-files-found: warn

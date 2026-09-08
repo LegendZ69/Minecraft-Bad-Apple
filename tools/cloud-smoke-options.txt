@@ -1,7 +1,7 @@
 onboardAccessibility:false
 pauseOnLostFocus:false
 renderDistance:10
-simulationDistance:4
+simulationDistance:5
 maxFps:60
 enableVsync:false
 soundCategory_master:0.0

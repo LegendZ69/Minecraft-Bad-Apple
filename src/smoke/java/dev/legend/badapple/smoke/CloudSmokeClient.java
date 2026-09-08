@@ -25,6 +25,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.Element;
 import net.minecraft.client.gui.ParentElement;
+import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.TitleScreen;
 import net.minecraft.client.gui.screen.world.CreateWorldScreen;
 import net.minecraft.client.gui.screen.world.WorldCreator;
@@ -50,6 +51,8 @@ public final class CloudSmokeClient implements ClientModInitializer {
     private final List<String> assertions = new ArrayList<>();
     private final List<Map<String, Object>> checkpoints = new ArrayList<>();
     private final List<Map<String, Object>> commands = new ArrayList<>();
+    private final List<Map<String, Object>> audioTiming = new ArrayList<>();
+    private final List<String> audioWarnings = new ArrayList<>();
     private Path output;
     private BadAppleClient mod;
     private long started;
@@ -82,6 +85,8 @@ public final class CloudSmokeClient implements ClientModInitializer {
         report.put("assertions", assertions);
         report.put("checkpoints", checkpoints);
         report.put("commands", commands);
+        report.put("audioTiming", audioTiming);
+        report.put("audioWarnings", audioWarnings);
         report.put("audioMixers", Arrays.stream(AudioSystem.getMixerInfo())
                 .map(info -> info.getName() + " / " + info.getDescription()).toList());
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -175,12 +180,14 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 initialClip = field(engine(), "audio", Clip.class);
                 report.put("javaSoundClipOpened", initialClip != null && initialClip.isOpen());
                 latestWarning = engine().warning();
+                audioSnapshot("initial-archive-opened");
                 command(client, "badapple pause");
                 pausedPosition = engine().positionSeconds();
                 audioPosition = initialClip == null ? -1 : initialClip.getMicrosecondPosition();
                 advance(5, 650);
             }
             case 5 -> {
+                audioSnapshot("pause-settled-650ms");
                 require(!engine().isPlaying() && Math.abs(engine().positionSeconds() - pausedPosition) < 0.002,
                         "Pause freezes playback timeline for at least 650ms");
                 if (initialClip != null) {
@@ -198,6 +205,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 advance(7, 1100);
             }
             case 7 -> {
+                audioSnapshot("resume-settled-1100ms");
                 require(engine().isPlaying() && engine().positionSeconds() > (referenceMode ? 30.5 : 0.5),
                         "Resume advances playback clock and frame selection");
                 report.put("audioClockAdvanced", initialClip != null
@@ -206,6 +214,25 @@ public final class CloudSmokeClient implements ClientModInitializer {
                     require(Boolean.TRUE.equals(report.get("audioClockAdvanced")) && engine().warning() == null,
                             "Real Java Sound output clock advances without fallback");
                 }
+                client.setScreen(new GameMenuScreen(true));
+                advance(13, 650);
+            }
+            case 13 -> {
+                require(client.isPaused() && !engine().isPlaying(),
+                        "Opening the single-player menu automatically pauses playback");
+                if (initialClip != null) require(!initialClip.isRunning(), "Single-player menu pauses Java Sound output");
+                pausedPosition = engine().positionSeconds();
+                advance(14, 650);
+            }
+            case 14 -> {
+                require(Math.abs(engine().positionSeconds() - pausedPosition) < 0.002,
+                        "Single-player menu retains a frozen playback timestamp");
+                client.setScreen(null);
+                advance(15, 650);
+            }
+            case 15 -> {
+                require(!client.isPaused() && engine().isPlaying(),
+                        "Closing the single-player menu automatically resumes playback");
                 command(client, "badapple pause");
                 command(client, "badapple seek " + (referenceMode ? "60" : "3"));
                 require(Math.abs(engine().positionSeconds() - (referenceMode ? 60 : 3)) < 0.002,
@@ -240,6 +267,12 @@ public final class CloudSmokeClient implements ClientModInitializer {
                         "Stop resets timeline and retains screen");
                 command(client, "badapple restart");
                 require(engine().isPlaying(), "Restart resumes from beginning");
+                advance(16, 150);
+            }
+            case 16 -> {
+                audioSnapshot("restart-settled-150ms");
+                require(engine().isPlaying() && engine().positionSeconds() < 0.4,
+                        "Restart returns to the beginning after a 150ms device settling window");
                 command(client, "badapple status");
                 command(client, "badapple unload");
                 require(engine() == null && screen() == null, "Unload releases movie and screen");
@@ -287,6 +320,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
     }
 
     private void command(MinecraftClient client, String command) throws Exception {
+        audioSnapshot("before /" + command);
         int result = Objects.requireNonNull(ClientCommandManager.getActiveDispatcher()).execute(command,
                 (FabricClientCommandSource) Objects.requireNonNull(client.getNetworkHandler()).getCommandSource());
         Map<String, Object> observation = new LinkedHashMap<>();
@@ -295,6 +329,51 @@ public final class CloudSmokeClient implements ClientModInitializer {
         observation.put("elapsedSeconds", (System.nanoTime() - started) / 1e9);
         commands.add(observation);
         require(result == 1, "Command accepted: /" + command);
+        audioSnapshot("after /" + command);
+    }
+
+    private void audioSnapshot(String label) throws ReflectiveOperationException {
+        Map<String, Object> sample = new LinkedHashMap<>();
+        sample.put("label", label);
+        sample.put("elapsedSeconds", (System.nanoTime() - started) / 1e9);
+        PlaybackEngine player = engine();
+        sample.put("engineLoaded", player != null);
+        if (player != null) {
+            synchronized (player) {
+                Clip clip = field(player, "audio", Clip.class);
+                sample.put("clipPresent", clip != null);
+                if (clip != null) {
+                    sample.put("clipMicrosecondsBeforeEngineUpdate", clip.getMicrosecondPosition());
+                    sample.put("clipFramePositionBeforeEngineUpdate", clip.getLongFramePosition());
+                    sample.put("clipOpen", clip.isOpen());
+                    sample.put("clipRunning", clip.isRunning());
+                    sample.put("clipActive", clip.isActive());
+                    sample.put("clipFrameLength", clip.getFrameLength());
+                    sample.put("clipMicrosecondLength", clip.getMicrosecondLength());
+                    sample.put("clipBufferBytes", clip.getBufferSize());
+                    sample.put("clipFormat", clip.getFormat().toString());
+                }
+                sample.put("enginePositionSeconds", player.positionSeconds());
+                sample.put("enginePlaying", player.isPlaying());
+                sample.put("engineWarning", player.warning());
+                if (player.warning() != null && !audioWarnings.contains(player.warning())) audioWarnings.add(player.warning());
+                Map<String, Object> clockState = new LinkedHashMap<>();
+                for (String name : List.of("audioDriving", "audioSeekPending", "audioStartPositionMicros",
+                        "lastAudioPosition", "audioStartNanos", "lastAudioAdvanceNanos")) {
+                    try {
+                        clockState.put(name, field(player, name, Object.class));
+                    } catch (NoSuchFieldException ignored) {
+                        // Keep diagnostics compatible while the clock is refactored.
+                    }
+                }
+                sample.put("engineAudioState", clockState);
+                if (clip != null) {
+                    sample.put("clipMicrosecondsAfterEngineUpdate", clip.getMicrosecondPosition());
+                    sample.put("clipFramePositionAfterEngineUpdate", clip.getLongFramePosition());
+                }
+            }
+        }
+        audioTiming.add(sample);
     }
 
     private void requestCapture(String name) {

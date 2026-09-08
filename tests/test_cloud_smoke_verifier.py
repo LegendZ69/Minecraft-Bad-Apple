@@ -1,6 +1,8 @@
 """Regression tests for the fail-closed runtime evidence gate."""
 from array import array
+from contextlib import redirect_stderr
 import importlib.util
+import io
 import json
 import math
 from pathlib import Path
@@ -36,11 +38,11 @@ class CloudSmokeVerifierTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "every stage"):
                 VERIFIER.verify_report(path)
 
-    def write_tone(self, path, frequency=440, amplitude=6000):
+    def write_tone(self, path, frequency=440, amplitude=6000, right_channel=True):
         values = array("h")
         for i in range(48000):
             sample = int(amplitude * math.sin(2 * math.pi * frequency * i / 48000))
-            values.extend((sample, sample))
+            values.extend((sample, sample if right_channel else 0))
         with wave.open(str(path), "wb") as stream:
             stream.setparams((2, 2, 48000, 48000, "NONE", "not compressed"))
             stream.writeframes(values.tobytes())
@@ -67,6 +69,24 @@ class CloudSmokeVerifierTest(unittest.TestCase):
             self.write_tone(path, frequency=880)
             with self.assertRaisesRegex(ValueError, "does not match"):
                 VERIFIER.verify_audio(path)
+
+    def test_missing_right_channel_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sink.wav"
+            self.write_tone(path, right_channel=False)
+            with self.assertRaisesRegex(ValueError, "between channels"):
+                VERIFIER.verify_audio(path)
+
+    def test_sink_diagnostic_survives_runtime_failure_without_passing_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            self.write_tone(path / "sink.wav")
+            (path / "smoke-report.json").write_text(json.dumps({"schemaVersion": 1, "status": "failed"}))
+            with redirect_stderr(io.StringIO()):
+                result = VERIFIER.main([str(path / "smoke-report.json"), "--audio-capture", str(path / "sink.wav"),
+                                        "--require-audio"])
+            self.assertEqual(1, result)
+            self.assertEqual("passed", json.loads((path / "audio-output-report.json").read_text())["status"])
 
 
 if __name__ == "__main__":

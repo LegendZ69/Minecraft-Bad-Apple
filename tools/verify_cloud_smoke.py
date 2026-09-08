@@ -98,6 +98,7 @@ def verify_audio(path: Path, frequency: float | None = 440.0) -> dict:
     if sys.byteorder != "little":
         samples.byteswap()
     mono = samples[::2]
+    right = samples[1::2]
     require(len(mono) >= 48000, "Less than one second of captured sink output")
     windows = []
     for offset in range(0, len(mono) - 4800 + 1, 4800):
@@ -113,10 +114,15 @@ def verify_audio(path: Path, frequency: float | None = 440.0) -> dict:
     if frequency is not None:
         require(len(matching) >= 5 and len(matching) / len(windows) >= 0.8,
                 f"Captured output does not match the expected {frequency:g}Hz test tone")
+        signal_energy = sum(value * value for value in mono)
+        channel_error = sum((left - other) ** 2 for left, other in zip(mono, right))
+        require(channel_error <= signal_energy * 0.01,
+                "Synthetic stereo capture differs between channels or one channel is missing")
     return {"status": "passed", "virtualSinkOutputVerified": True, "physicalAudioVerified": False,
             "sampleRate": 48000, "channels": 2, "capturedSeconds": len(mono) / 48000,
             "nonSilentWindows": len(windows), "matchingToneWindows": len(matching),
-            "expectedToneHz": frequency, "peakWindowRms": max(item[0] for item in windows)}
+            "expectedToneHz": frequency, "peakWindowRms": max(item[0] for item in windows),
+            "syntheticStereoAgreementVerified": frequency is not None}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,16 +133,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reference", action="store_true", help="Validate reference checkpoints instead of synthetic colors/tone")
     args = parser.parse_args(argv)
     try:
+        # Preserve the sink diagnostic even when runtime clock checks fail. A
+        # successful PCM capture is only one gate and never overrides the rest.
+        if args.audio_capture:
+            try:
+                audio_report = verify_audio(args.audio_capture, frequency=None if args.reference else 440.0)
+            except (OSError, ValueError, wave.Error) as error:
+                audio_report = {"status": "failed", "failure": str(error), "physicalAudioVerified": False}
+                (args.report.parent / "audio-output-report.json").write_text(
+                        json.dumps(audio_report, indent=2) + "\n", encoding="utf-8")
+                raise
+            (args.report.parent / "audio-output-report.json").write_text(
+                    json.dumps(audio_report, indent=2) + "\n", encoding="utf-8")
         report = verify_report(args.report, reference=args.reference)
         if args.require_audio:
             require(report.get("javaSoundClipOpened") is True and report.get("audioClockAdvanced") is True,
                     "Java Sound clip did not open and advance")
             require(report.get("audioWarning") is None, "Playback fell back to silent timing")
+            require(not report.get("audioWarnings"), "Playback reported an audio failure before reload")
             require(args.audio_capture is not None, "--require-audio requires --audio-capture")
-        if args.audio_capture:
-            audio_report = verify_audio(args.audio_capture, frequency=None if args.reference else 440.0)
-            (args.report.parent / "audio-output-report.json").write_text(
-                    json.dumps(audio_report, indent=2) + "\n", encoding="utf-8")
         compared = sum(item["gpuPixelsCompared"] for item in report["checkpoints"])
         print(f"Cloud Minecraft verification passed: {len(report['assertions'])} assertions; "
               f"4 world screenshots; {compared} exact GPU pixel comparisons")

@@ -7,10 +7,51 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 URL = "https://www.nicovideo.jp/watch/sm8628149"
+
+
+def summarize_download_failure(stderr: str | None, returncode: int | None = None) -> dict:
+    """Classify diagnostics without retaining raw URLs, headers, paths or tokens.
+
+    Redacting a fixed set of query parameters is insufficient: signed CDN URLs
+    use changing parameter names. Only fixed category messages and bounded
+    numeric facts cross from downloader diagnostics into durable reports.
+    """
+    original = stderr or ""
+    text = (original[:16_384] + "\n" + original[-16_384:]).lower()
+    match = re.search(r"\bhttp(?:\s+error|/[12](?:\.\d)?|\s+status)?\s*[:=]?\s*([1-5]\d{2})\b", text)
+    status = int(match.group(1)) if match else None
+    if "no module named yt_dlp" in text or "ffmpeg is not installed" in text or "ffprobe is not installed" in text:
+        category, reason = "missing_dependency", "A required downloader or media dependency is unavailable."
+    elif status == 429 or "too many requests" in text or "rate limit" in text:
+        category, reason = "rate_limited", "The public source rate-limited this request; no bypass was attempted."
+    elif status == 401 or any(value in text for value in ("sign in", "sign-in", "login required", "log in", "captcha", "not a bot")):
+        category, reason = "authentication_or_challenge", "The public source requested authentication or a challenge; no credentials or bypass were used."
+    elif status in (403, 451) or any(value in text for value in ("geo-restricted", "not available in your country", "access denied", "forbidden")):
+        category, reason = "access_restricted", "The public source or media endpoint denied access; no bypass was attempted."
+    elif status in (404, 410) or any(value in text for value in ("video unavailable", "video is unavailable", "private video", "has been removed", "has been deleted")):
+        category, reason = "source_unavailable", "The requested public source or media resource was unavailable."
+    elif status is not None and status >= 500:
+        category, reason = "upstream_error", "The public source reported an upstream service error."
+    elif any(value in text for value in ("timed out", "timeout", "name resolution", "network is unreachable", "connection reset", "connection refused", "certificate verify failed")):
+        category, reason = "network_error", "The public request failed because of a connection, DNS, timeout or certificate error."
+    elif any(value in text for value in ("requested format is not available", "unable to extract", "no video formats")):
+        category, reason = "extractor_or_format_error", "The downloader could not extract the requested public metadata or media format."
+    elif "no space left" in text or "permission denied" in text:
+        category, reason = "local_storage_error", "The downloader could not write to its isolated working directory."
+    else:
+        category, reason = "download_failed", "The public-source downloader failed; raw diagnostics were omitted to avoid retaining sensitive URLs or credentials."
+    result = {"failureCategory": category, "reason": reason, "rawDiagnosticsIncluded": False,
+              "diagnosticCharacters": min(len(original), 10_000_000)}
+    if status is not None:
+        result["httpStatus"] = status
+    if type(returncode) is int and -255 <= returncode <= 255:
+        result["downloaderExitCode"] = returncode
+    return result
 
 
 def main():
@@ -34,9 +75,13 @@ def main():
     try:
         result = subprocess.run(command, text=True, capture_output=True, timeout=240)
         if result.returncode:
-            report["reason"] = result.stderr[-5000:]
+            report.update(summarize_download_failure(result.stderr, result.returncode))
     except subprocess.TimeoutExpired:
-        report["reason"] = "Public source download exceeded 240 seconds; stopped without bypass attempts."
+        report.update(failureCategory="request_timeout", rawDiagnosticsIncluded=False,
+                      reason="Public source download exceeded 240 seconds; stopped without bypass attempts.")
+    except OSError:
+        report.update(failureCategory="downloader_unavailable", rawDiagnosticsIncluded=False,
+                      reason="The configured downloader could not be started; raw operating-system diagnostics were omitted.")
     if result is None or result.returncode:
         (args.report_dir / "reference-acquisition.json").write_text(json.dumps(report, indent=2) + "\n")
         print("Original reference unavailable; explicit evidence recorded. Synthetic QA remains required.")

@@ -1,8 +1,9 @@
 # Bad Apple in Minecraft
 
-A **Minecraft Java 1.21.1 / Fabric client mod** that plays the original video on a screen inside your world, with native-resolution frames, source timestamps, and synchronized audio.
+A **Minecraft Java 1.21.1 / Fabric client mod** that plays a source video on a screen inside your world, with native-resolution frames, source timestamps, and synchronized audio.
 
-Reference: [【東方】Bad Apple!! PV【影絵】](https://www.youtube.com/watch?v=FtutLA63Cp8).
+Requested reference: [YouTube video](https://www.youtube.com/watch?v=FtutLA63Cp8).
+Primary references: [original animation by あにら](https://www.nicovideo.jp/watch/sm8628149) and [Alstroemeria Records' upload](https://www.youtube.com/watch?v=i41KoE0iMYU). These are explicit source choices, not automatically interchangeable files. See [reference research and verification](docs/REFERENCE_SOURCES.md).
 
 ## What “1:1” means here
 
@@ -18,8 +19,8 @@ Preserving decoded frames does not make the whole viewing pipeline mathematicall
 ## Install
 
 1. Install **Minecraft Java 1.21.1**, [Fabric Loader](https://fabricmc.net/use/installer/) 0.16.5 or newer, and the **Fabric API for 1.21.1**. Minecraft 1.21.1 uses Java 21.
-2. Build this project, or download the `minecraft-bad-apple-fabric-1.21.1` artifact from a successful run on the repository’s [Actions page](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions).
-3. Put `minecraft-bad-apple-1.0.0.jar` in your Minecraft instance’s `mods` folder alongside Fabric API. Do not install a sources JAR.
+2. Download the installable JAR and optional portable tools bundle from [v1.1.0](https://github.com/LegendZ69/Minecraft-Bad-Apple/releases/tag/v1.1.0). `SHA256SUMS` covers every asset; `build-info.json` records the exact source commit. The evidence ZIP contains measured verification results, not the full original media.
+3. Put `minecraft-bad-apple-1.1.0.jar` in your Minecraft instance’s `mods` folder alongside Fabric API. Do not install a sources JAR or smoke-test code.
 4. Create a `badapple` folder in the same instance directory (next to `mods`). Put the prepared `bad_apple.bapple` file there.
 5. Start the Fabric instance, join a world, face an open area, and run:
 
@@ -35,18 +36,23 @@ Requires **Python 3.10+**, **FFmpeg**, and **ffprobe** on your `PATH`. No Python
 
 ```sh
 python tools/prepare_video.py "Bad Apple.mp4" --output bad_apple.bapple
+python tools/verify_archive.py bad_apple.bapple --source "Bad Apple.mp4" --report verification.json
 ```
 
 The converter probes the actual source instead of assuming its resolution, frame rate, or duration. It extracts all decoded frames and matching audio, then packages them into a seekable `.bapple` archive. The audio is aligned to the first video frame, including offset tracks, converted to PCM 16 stereo 48 kHz, and padded/trimmed to the video duration. Conversion uses temporary files and only replaces the destination on success. Existing output is preserved unless you pass `--force`.
 
-If you want the converter to obtain the supplied reference URL, install `yt-dlp` and use its optional download mode:
+To obtain a specific public source, install `yt-dlp` and choose exactly one optional download mode:
 
 ```sh
 python -m pip install -U yt-dlp
 python tools/prepare_video.py --download-reference --output bad_apple.bapple
+# Original creator's NicoVideo upload:
+python tools/prepare_video.py --download-original --output original.bapple
+# Official label's YouTube upload:
+python tools/prepare_video.py --download-official --output official.bapple
 ```
 
-YouTube may refuse automated requests. If that happens, supply a local copy of the exact reference video to the first command. Downloading/conversion requires network access only for the optional download; playback itself is offline. No invented or substitute animation is included.
+YouTube refused cloud access with a sign-in/bot check during verification. No authentication gates were bypassed. If a source is unavailable, supply an authorized local copy of that exact reference. Downloading/conversion requires network access only for the optional download; playback itself is offline. No invented or substitute animation is included, and the release does not redistribute the full animation or recording.
 
 ## Controls
 
@@ -87,9 +93,11 @@ gradle build
 python -m unittest discover -s tests -v
 ```
 
-The installable mod is `build/libs/minecraft-bad-apple-1.0.0.jar`.
+The installable mod is `build/libs/minecraft-bad-apple-1.1.0.jar`.
 
-The GitHub Actions workflow installs the pinned toolchain, runs the Python conversion tests, compiles/remaps the Fabric mod, runs playback tests, and uploads the JAR. Python tests generate small synthetic video/audio fixtures, including offset audio. Java tests exercise archive validation and timestamp-based playback. These checks do not substitute for visual and audio testing inside an actual Minecraft client.
+The GitHub Actions workflow installs the pinned toolchain, runs Python and Java tests, compiles/remaps the Fabric mod, checks reproducible JAR bytes, exhaustively compares decoded frames/timestamps/normalized PCM, and launches an actual Minecraft client under Xvfb/Mesa. The isolated smoke harness measures GPU pixels, screen orientation, controls, and a virtual stereo audio sink. The full original is downloaded only into the ephemeral runner when publicly accessible. Publication is gated on the successful main-branch build; release assets are downloaded and checksum-verified before and after publication.
+
+See the [v1.1.0 verification record](docs/releases/v1.1.0.md) and [historical v1.0.0 record](docs/releases/v1.0.0.md) for completed checks and explicit limits. Physical speakers, other players' computers, multiplayer synchronization, shader compatibility, and equivalence to an inaccessible YouTube reupload are not inferred from cloud tests.
 
 ## Archive format
 

@@ -14,9 +14,9 @@ Alstroemeria Records, or the animation's creators.
 
 These selections never silently substitute for each other. An official upload is
 not necessarily the same edit, encoding, duration, or frame sequence as the
-user-linked upload. Their exact equivalence has **not** been verified. No source
-resolution, frame rate, duration, or media checksum is claimed as verified by this
-research.
+user-linked upload. Their exact equivalence has **not** been verified. The cloud
+check below verifies the downloaded NicoVideo source and its conversion only;
+it does not establish equivalence with either YouTube upload.
 
 ## Why the label upload is an official reference
 
@@ -39,15 +39,54 @@ identifies the arrangement by Masayoshi Minoshima, lyrics by Haruka, vocals by
 nomico, and original composition by ZUN. These credits identify contributors;
 they are not a license to redistribute their recordings or animation.
 
-## What was and was not retrieved
+## Retrieval and verification record
 
 Built-in web search returned the indexed title and description excerpts above.
 Direct retrieval of the two YouTube watch pages and the original NicoVideo page
-failed during this research. No animation or audio bytes were obtained through
-that search, and no frame/audio comparison was performed. Search snippets and
-uploader metadata are not media-level verification.
+failed during the initial research. The subsequent cloud run successfully
+obtained media from the original NicoVideo URL and verified its conversion, as
+recorded below. Both YouTube URLs returned a sign-in/bot-confirmation gate in
+that cloud run; neither was downloaded or compared. Search snippets and uploader
+metadata alone are not media-level verification.
 
-`tools/probe_references.py --report build/reference-access.json` records a fresh,
+### Completed original-source conversion check
+
+[Cloud run 34176311242](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34176311242)
+on September 8, 2026 downloaded `sm8628149`, converted it, and exhaustively
+compared the archive with that local source. Its
+[reference-acquisition-evidence artifact](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34176311242/artifacts/10037389762)
+contains `reference-access.json`, `reference-reports/reference-acquisition.json`,
+and `reference-reports/original-source-comparison.json`.
+
+| Measurement | Verified result |
+| --- | --- |
+| Source dimensions | 512 × 384 decoded pixels |
+| Video frames | All 6,573 decoded frames compared |
+| RGB data | All 3,876,913,152 RGB24 bytes equal |
+| Timing | Every relative presentation timestamp and video duration equal |
+| Video/archive duration | 219.100 seconds; the platform metadata rounds to 219 seconds |
+| Normalized audio | All 10,516,800 stereo PCM sample frames equal at 48 kHz, signed 16-bit |
+| Archive integrity | ZIP CRCs, complete frame sequence, every PNG's dimensions/chunk CRCs/scanlines, timestamps, PCM format and duration passed |
+
+Downloaded source file SHA-256:
+
+```text
+93480e9b35738d81435d8434df3e031bd3ac34634c73ba4f4ce99d4595bbf4fa
+```
+
+The comparison preserves every FFmpeg-decoded RGB24 pixel and relative timestamp.
+Audio equality is against the documented aligned, resampled, padded/trimmed
+48 kHz stereo signed-16-bit output, not against the compressed source audio
+bytes. The hash identifies this downloaded file, not every encoding the service
+might provide later. The technical report does not independently authenticate
+ownership or establish redistribution rights.
+
+Playback of this original-source archive inside Minecraft is **not yet
+verified** in this record; it is a separate runtime check. Neither the label's
+official YouTube upload nor the user's YouTube reference has a verified
+frame/audio comparison with this source.
+
+`python tools/probe_references.py --report build/reference-access.json` records a fresh,
 bounded public metadata probe for each exact URL. A metadata success does not
 mean media was downloaded or its identity verified. Access failures remain
 explicit in the report; the project does not use cookies, proxies, or challenge

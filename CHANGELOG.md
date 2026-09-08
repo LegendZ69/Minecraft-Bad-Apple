@@ -9,10 +9,19 @@ original animation and recording, which are not distributed in these releases.
 - Add distinct official, original, and user-reference download selections and
   source provenance.
 - Add exhaustive archive-to-source verification and reusable synthetic fixtures.
+- Acquire the original NicoVideo source in cloud
+  [run 34176311242](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34176311242)
+  and verify all 6,573 decoded 512 × 384 frames, relative timestamps,
+  219.100-second duration, and normalized audio against the converted archive.
 - Add isolated Minecraft cloud smoke testing and saved verification evidence.
+- Correct stale audio-clock readings after backward seeks, restart, and loops;
+  retain elapsed time when a stalled device falls back to silent playback. Add
+  eleven injected-device regression cases, pending final CI execution.
 - Document primary reference sources, distribution limits, and versioned builds.
 
-No final CI/runtime result is claimed yet. See the
+Both YouTube references remain sign-in/bot gated, so equivalence with them is not
+verified. Original-source conversion is complete; final build and original-media
+Minecraft runtime checks remain pending. See the
 [v1.1.0 release record](docs/releases/v1.1.0.md) for the verification checklist.
 
 ## 1.0.0 — baseline

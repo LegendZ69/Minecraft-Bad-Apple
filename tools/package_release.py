@@ -232,7 +232,9 @@ def package_release(*, version: str, commit: str, jar: Path, output: Path,
     files = ["README.md", "tools/prepare_video.py", "tools/verify_archive.py", "tools/generate_fixture.py"]
     for name in files:
         require((source / name).is_file() and not (source / name).is_symlink(), f"Portable bundle source is missing: {name}")
-    optional = ["tools/package_release.py", "tools/verify_cloud_smoke.py", "tools/probe_references.py", "tools/acquire_original.py",
+    optional = ["tools/package_release.py", "tools/publish_release.py", "tools/verify_cloud_smoke.py", "tools/probe_references.py", "tools/acquire_original.py",
+                "tests/test_package_release.py", "tests/test_publish_release.py", "tests/test_acquire_original.py",
+                "tests/test_prepare_video.py", "tests/test_verify_archive.py", "tests/test_cloud_smoke_verifier.py",
                 "docs/REFERENCE_SOURCES.md", "docs/REFERENCE.md", "docs/TESTING.md", "CHANGELOG.md"]
     release_notes = f"docs/releases/v{version}.md"
     require((source / release_notes).is_file(), f"Versioned release notes are required: {release_notes}")
