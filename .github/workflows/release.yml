@@ -9,13 +9,17 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: verified-release-publication
   cancel-in-progress: false
 
 jobs:
   release:
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_sha == github.sha
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -45,6 +49,7 @@ jobs:
         run: |
           python tools/package_release.py --verify-directory dist/v1.1.0
           python -c 'import json,os; assert json.load(open("dist/v1.1.0/build-info.json"))["commit"] == os.environ["EXPECTED_BUILD_COMMIT"]'
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')" = "$EXPECTED_BUILD_COMMIT"
       - name: Reuse an existing immutable baseline release on retries
         id: baseline
         run: |
