@@ -18,6 +18,43 @@ SPEC.loader.exec_module(VERIFIER)
 
 
 class CloudSmokeVerifierTest(unittest.TestCase):
+    def restart_report(self, elapsed=1.1, position=1.05):
+        return {"restartVerification": {
+            "status": "passed", "playing": True, "elapsedSeconds": elapsed,
+            "positionSeconds": position, "errorSeconds": position - elapsed,
+            "maxObservationSeconds": 5.0, "toleranceSeconds": 0.25,
+        }}
+
+    def test_restart_accepts_measured_delayed_tick_and_historical_report(self):
+        VERIFIER.verify_restart(self.restart_report())
+        VERIFIER.verify_restart({})
+
+    def test_restart_rejects_old_position_jump_or_frozen_clock(self):
+        for position in (120, 2, 0):
+            with self.subTest(position=position), self.assertRaisesRegex(ValueError, "track elapsed time"):
+                VERIFIER.verify_restart(self.restart_report(position=position))
+
+    def test_restart_rejects_invalid_or_out_of_range_clocks(self):
+        for elapsed, position in ((-1, 0), (1.1, -1), (5.01, 5), (float("nan"), 1),
+                                  (1, float("inf"))):
+            with self.subTest(elapsed=elapsed, position=position), self.assertRaises(ValueError):
+                VERIFIER.verify_restart(self.restart_report(elapsed=elapsed, position=position))
+
+    def test_restart_rejects_mismatched_error_or_relaxed_limits(self):
+        for key, value in (("errorSeconds", 0), ("errorSeconds", float("nan")),
+                           ("toleranceSeconds", 1), ("maxObservationSeconds", 120),
+                           ("status", "failed"), ("playing", False)):
+            with self.subTest(key=key, value=value):
+                report = self.restart_report()
+                report["restartVerification"][key] = value
+                with self.assertRaises(ValueError):
+                    VERIFIER.verify_restart(report)
+
+    def test_restart_rejects_present_non_object(self):
+        for value in (None, [], "passed"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "verification object"):
+                VERIFIER.verify_restart({"restartVerification": value})
+
     def full_reference_report(self):
         duration = 219.1
         frame_count = 6573

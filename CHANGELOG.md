@@ -27,26 +27,25 @@ original animation and recording, which are not distributed in these releases.
   [buffer probe](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34177059058).
   Only that combination produced the intended nine-second stereo output; see the
   [source-backed diagnosis](docs/releases/v1.1.0.md#native-audio-buffering-diagnosis).
-- Pass 101 Python tests, 38 Java tests, reproducible Fabric JAR checks, and actual
-  Minecraft synthetic controls/strict stereo-audio verification in Fabric's
-  development runtime in
-  [integrated run 34178311059](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059).
-- Complete the original 219.1-second animation in that development-runtime run
-  without audio fallback: 59 assertions and 45 exact GPU readbacks passed.
-  The run displayed 2,295 of 6,573 source frames (34.9%), skipping 4,278; this is
-  not a claim of displaying every frame or achieving 30 FPS.
-- Pass 106 Python and 38 Java tests plus the exact-JAR synthetic production
-  controls/GPU/strict stereo stage in
-  [run 34178900645](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178900645).
-  These are completed-step results, not a claim that the whole run completed.
-  The final gate extensions pass 110 Python tests locally and are rerun by CI.
+- Pass 110 Python tests, 38 Java tests, reproducible JAR checks, and both exact-JAR
+  synthetic and full-original production-runtime checks in successful
+  [run 34179488804](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34179488804).
+- Complete 219.1 seconds of original animation in 219.2220 seconds without audio
+  fallback: 73 assertions and 45 exact GPU readbacks passed. The production run
+  displayed 6,001 of 6,573 frames (91.2977%), skipping 572, at 29.7735 world-render
+  callbacks/s. This does not claim every source frame displayed or guaranteed
+  30 FPS. The earlier 34.9% result was a development-runtime measurement only.
+- Propagate failed CI pipelines through log capture and restrict publication to
+  the exact successful build that is still current on `main`.
+- Verify restart against measured dispatch elapsed time rather than a fixed
+  short scheduling deadline, while rejecting stale jumps and frozen clocks.
 - Document primary reference sources, distribution limits, and versioned builds.
 
 Both YouTube references remain sign-in/bot gated, so equivalence with them is not
 verified. Original-source conversion and 219-second synthetic conversion stress
-checks and full original-media development-runtime playback are complete.
-Full-original production playback is an enforced final publication gate, not an
-already-observed result in this historical record. See the
+checks and exact-JAR full-original production playback completed in the recorded
+run. Both production gates must pass again for the final published revision; a
+later workflow is not assumed successful from these historical results. See the
 [v1.1.0 release record](docs/releases/v1.1.0.md) and packaged `build-info.json`
 for the final build identity, runtime bindings, and evidence.
 The production-test launcher is separate from an authenticated Minecraft

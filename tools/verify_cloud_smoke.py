@@ -32,6 +32,27 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def verify_restart(report: dict) -> None:
+    """Check restart against observed wall time, not an assumed tick deadline."""
+    if "restartVerification" not in report:
+        return
+    restart = report["restartVerification"]
+    require(isinstance(restart, dict), "Invalid restart verification object")
+    require(restart.get("status") == "passed" and restart.get("playing") is True,
+            "Restart verification failed or playback was not running")
+    for key in ("elapsedSeconds", "positionSeconds", "errorSeconds", "maxObservationSeconds", "toleranceSeconds"):
+        value = restart.get(key)
+        require(type(value) in (int, float) and math.isfinite(value), f"Invalid restart {key}")
+    require(restart["maxObservationSeconds"] == 5.0 and restart["toleranceSeconds"] == 0.25,
+            "Restart verification changed its observation limits")
+    elapsed = restart["elapsedSeconds"]
+    position = restart["positionSeconds"]
+    error = restart["errorSeconds"]
+    require(0 <= elapsed <= 5.0 and position >= 0, "Restart observation clock is out of range")
+    require(abs(error - (position - elapsed)) <= 1e-6, "Restart reported error differs from its observed clocks")
+    require(abs(error) <= 0.25, "Restart playback did not track elapsed time from the beginning")
+
+
 def verify_reference_full_run(report: dict) -> dict:
     """Require native GPU and advancing audio evidence across the entire movie.
 
@@ -192,6 +213,7 @@ def verify_report(path: Path, reference: bool = False) -> dict:
     require(report.get("finalStage") == 12, "Smoke client did not finish every stage")
     require(report.get("minecraft") == "1.21.1", "Wrong Minecraft runtime version")
     require(bool(report.get("referenceMode")) == reference, "Wrong media mode in smoke evidence")
+    verify_restart(report)
     require(len(report.get("assertions", [])) >= 30, "Too few runtime assertions")
     commands = report.get("commands", [])
     require(len(commands) >= 20 and all(item.get("result") == 1 for item in commands), "Missing or failed client commands")

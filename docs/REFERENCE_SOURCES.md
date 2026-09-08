@@ -81,42 +81,50 @@ bytes. The hash identifies this downloaded file, not every encoding the service
 might provide later. The technical report does not independently authenticate
 ownership or establish redistribution rights.
 
-### Completed full-animation Minecraft check
+### Completed exact-JAR full-animation production check
 
-[Integrated run 34178311059](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059)
-repeated the source-to-archive comparison and completed the original animation
-in actual Minecraft 1.21.1 using Fabric's development runtime: 219.1 seconds of
-media in 219.2002 seconds, ending at frame 6,572 without audio fallback or
-warnings. All 59 runtime assertions passed, including 45 periodic GPU samples
-covering 8,847,360 exact uploaded-texture pixels. Both virtual audio channels
-contained 218.4 seconds of non-silent output; physical speakers were not tested.
+[Run 34179488804](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34179488804)
+completed successfully at commit `ca380ac5be96533497f6c7cad7f798a0d40a10b7`.
+It passed 110 Python and 38 Java tests, repeated exhaustive source conversion,
+and ran both synthetic checks and the complete original animation in actual
+Minecraft 1.21.1 through Fabric's production-test launcher. Both runtime reports
+identify the same loaded mod JAR hash, `developmentEnvironment=false`, and the
+`intermediary` namespace.
 
-Only 2,295 of the 6,573 source frames (34.9%) were uploaded during the playthrough;
-4,278 were skipped. All source frames are preserved in the archive, but this
-test does **not** demonstrate every frame displayed or 30 FPS presentation. Its
-mean was 10.74 world-render callbacks per second and maximum sampled uploaded
-frame lag was 374 ms. The evidence does not isolate the throughput limitation's
-cause. GPU equality is checked against the texture actually uploaded, not every
-original frame or the final perspective-transformed screen.
+The full original played 219.1 seconds of media in 219.2220 seconds, ended at
+frame 6,572, and never fell back to silent timing. All 73 runtime assertions
+passed. Forty-five periodic GPU samples compared 8,847,360 exact
+uploaded-texture pixels. Both virtual audio channels contained 218.3 seconds of
+non-silent output in a 262.612-second diagnostic recording; physical speakers
+and independent physical audio/video synchronization were not tested.
 
-This full run used a separately downloaded container. Its decoded RGB sequence
-hash matches the first acquisition above, even though the container and archive
-hashes differ:
+The production run uploaded 6,001 of 6,573 source frames (91.2977%), skipping
+572, with 29.7735 world-render callbacks per second and a maximum sampled frame
+lag of 58.585 ms. All source frames are preserved in the archive, but this is
+**not** proof that every source frame was displayed or of guaranteed 30 FPS.
+GPU equality is checked against sampled uploaded textures, not every original
+frame or the final perspective-transformed screen.
 
-| Full-run file | SHA-256 |
+| File in production run 34179488804 | SHA-256 |
 | --- | --- |
-| Downloaded source | `d6c418b138b2c2003500175b3f121eff0fb910f1cfc6966a3128d17589fd75cf` |
-| Converted archive | `3ef298e4be6ee183a678d56140a370ad01bf33b9b5f095351a1e92e26a127c53` |
+| Loaded mod JAR, both runtime tests | `4e839f447e295ba6844f999a6fa46011ec2965c84ce9691dfb8b0945d8df2f5f` |
+| Downloaded source | `b044ff73cd9aa00ae0a16e2d7e2290d64da3caa2edbfc88b05eff8344a89ca6b` |
+| Converted archive | `4fb0ac706434b437f9dcc14531aabbf12ce18ba11576544ca5931cb4d0a6ee82` |
 
-The exact-JAR synthetic production controls/GPU/stereo stage subsequently passed
-in [run 34178900645](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178900645);
-that completed-step result does not assert whole-run completion. The final
-publication gate additionally requires a full-original production-namespace run
-bound to the same release JAR SHA-256. Its actual result is recorded in packaged
-`build-info.json` and runtime reports, not inferred from the earlier development
-run above. The official Fabric production-test launcher is distinct from an
-authenticated Minecraft Launcher installation. Neither YouTube upload has a
-verified frame/audio comparison with this source. See the
+The decoded RGB sequence hash matches the first acquisition above, despite
+different downloaded-container/archive hashes. Historical
+[development run 34178311059](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059)
+also completed the animation but uploaded 2,295 frames (34.9%), skipping 4,278 at
+10.74 callbacks/s. That is an earlier development-runtime result, not the
+production result above; the evidence does not isolate the throughput difference's
+cause.
+
+Each publication must repeat both exact-JAR production gates. Final identities
+and actual results are recorded in packaged `build-info.json` and runtime
+reports; a later workflow is not assumed successful from this recorded run.
+Fabric's production-test launcher is distinct from an authenticated Minecraft
+Launcher installation. Neither YouTube upload has a verified frame/audio
+comparison with this source. See the
 [v1.1.0 verification record](releases/v1.1.0.md) for the complete evidence scope.
 
 `python tools/probe_references.py --report build/reference-access.json` records a fresh,

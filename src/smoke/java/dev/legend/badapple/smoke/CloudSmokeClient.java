@@ -89,6 +89,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
     private int fullFirstUploadedFrame = -1;
     private int fullLastUploadedFrame = -1;
     private long syntheticRunStartedNanos;
+    private long restartStartedNanos;
 
     @Override
     public void onInitializeClient() {
@@ -326,14 +327,13 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 command(client, "badapple stop");
                 require(!engine().isPlaying() && engine().positionSeconds() == 0 && screen() != null,
                         "Stop resets timeline and retains screen");
-                command(client, "badapple restart");
+                restartStartedNanos = command(client, "badapple restart");
                 require(engine().isPlaying(), "Restart resumes from beginning");
                 advance(16, 150);
             }
             case 16 -> {
-                audioSnapshot("restart-settled-150ms");
-                require(engine().isPlaying() && engine().positionSeconds() < 0.4,
-                        "Restart returns to the beginning after a 150ms device settling window");
+                verifyRestartTiming();
+                audioSnapshot("restart-settled-observed");
                 command(client, "badapple status");
                 command(client, "badapple unload");
                 require(engine() == null && screen() == null, "Unload releases movie and screen");
@@ -648,8 +648,41 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 "nativeStackPointerPreserved", true));
     }
 
-    private void command(MinecraftClient client, String command) throws Exception {
+    private void verifyRestartTiming() throws ReflectiveOperationException {
+        PlaybackEngine player = engine();
+        double position;
+        double elapsed;
+        boolean playing;
+        synchronized (player) {
+            // One native-backed clock read paired with wall time immediately
+            // afterward. A scheduled 150ms delay is a minimum, not a deadline;
+            // diagnostic reads and a busy cloud runner can both delay this tick.
+            position = player.positionSeconds();
+            elapsed = (System.nanoTime() - restartStartedNanos) / 1e9;
+            playing = field(player, "playRequested", Boolean.class);
+        }
+        double error = position - elapsed;
+        boolean bounded = elapsed >= 0 && elapsed <= 5.0;
+        boolean matched = Double.isFinite(position) && position >= 0 && Math.abs(error) <= 0.25;
+        Map<String, Object> observation = new LinkedHashMap<>();
+        observation.put("elapsedSeconds", elapsed);
+        observation.put("positionSeconds", position);
+        observation.put("errorSeconds", error);
+        observation.put("playing", playing);
+        observation.put("maxObservationSeconds", 5.0);
+        observation.put("toleranceSeconds", 0.25);
+        observation.put("status", bounded && matched && playing ? "passed" : "failed");
+        report.put("restartVerification", observation);
+        require(bounded, "Restart timing is inconclusive: observation exceeded the 5-second scheduling bound");
+        require(playing, "Restart is still playing at its measured observation time");
+        require(matched, "Restart position matches elapsed time from zero within 250ms, without stale offset or frozen clock");
+    }
+
+    private long command(MinecraftClient client, String command) throws Exception {
         audioSnapshot("before /" + command);
+        // Exclude the pre-command diagnostic reads from the restart's time
+        // origin: the zero-position playback request has not happened yet.
+        long commandStartedNanos = System.nanoTime();
         int result = Objects.requireNonNull(ClientCommandManager.getActiveDispatcher()).execute(command,
                 (FabricClientCommandSource) Objects.requireNonNull(client.getNetworkHandler()).getCommandSource());
         Map<String, Object> observation = new LinkedHashMap<>();
@@ -659,6 +692,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
         commands.add(observation);
         require(result == 1, "Command accepted: /" + command);
         audioSnapshot("after /" + command);
+        return commandStartedNanos;
     }
 
     private void audioSnapshot(String label) throws ReflectiveOperationException {
