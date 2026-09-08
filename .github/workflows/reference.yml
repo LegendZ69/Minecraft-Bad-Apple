@@ -1,0 +1,29 @@
+name: Verify public reference access
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/probe_references.py'
+      - '.github/workflows/reference.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  references:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install yt-dlp
+      - name: Probe official and user-supplied references
+        run: python tools/probe_references.py --report build/reference-access.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reference-access-evidence
+          path: build/reference-access.json
+          if-no-files-found: error
