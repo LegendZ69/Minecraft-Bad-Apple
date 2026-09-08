@@ -5,6 +5,7 @@ import dev.legend.badapple.client.BadAppleClient;
 import dev.legend.badapple.client.MovieScreen;
 import dev.legend.badapple.client.PngFrames;
 import dev.legend.badapple.playback.PlaybackEngine;
+import dev.legend.badapple.playback.Timeline;
 import java.lang.reflect.Field;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -388,6 +389,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
                 fullPlayback.put("worldWidth", field(screen(), "width", Double.class));
                 fullPlayback.put("worldHeight", field(screen(), "height", Double.class));
                 fullPlayback.put("sampleIntervalSeconds", 5);
+                fullPlayback.put("samplingMode", "render-clock-snapshot-v1");
                 fullPlayback.put("startedAtPositionSeconds", player.positionSeconds());
                 fullPlayback.put("startingCommandIndex", commands.size());
                 fullPlayback.put("initialFramePreloadedAtStart", true);
@@ -396,6 +398,7 @@ public final class CloudSmokeClient implements ClientModInitializer {
                         + "Distinct uploaded frames are counted only from actual world-render callbacks after restart; "
                         + "the initially preloaded frame zero is verified separately. Software rendering may skip source frames. "
                         + "GPU comparisons verify the actually uploaded frame, which may lag timeline selection. "
+                        + "Frame freshness uses a non-native timeline snapshot after rendering, before separately timed raw audio diagnostics. "
                         + "Initial raw audio position may still reflect the previous seek while the device settles. "
                         + "Physical speakers and every original frame being displayed are not assumed.");
                 report.put("fullPlayback", fullPlayback);
@@ -496,28 +499,33 @@ public final class CloudSmokeClient implements ClientModInitializer {
         Clip clip = field(player, "audio", Clip.class);
         require(clip != null, "Full reference sample retains its Java Sound device");
         Map<String, Object> sample = new LinkedHashMap<>();
-        long beforeEngineRead = System.nanoTime();
+        long beforeSnapshot = System.nanoTime();
         double position;
         synchronized (player) {
-            position = player.positionSeconds();
-            long afterEngineRead = System.nanoTime();
-            // Use the device position accepted by this exact engine update for
-            // synchronized A/V evidence. A second ALSA query can itself block,
-            // so record that independent raw reading with its own timestamps.
-            sample.put("elapsedSeconds", (afterEngineRead - fullStartedNanos) / 1e9);
+            // MovieScreen already updated the device-led clock before drawing.
+            // Read that timeline without another native query: a blocking ALSA
+            // diagnostic must not age the already-rendered frame retroactively.
+            position = field(player, "timeline", Timeline.class).positionMicros() / 1_000_000.0;
+            long afterSnapshot = System.nanoTime();
+            sample.put("samplingMode", "render-clock-snapshot-v1");
+            sample.put("snapshotStartedElapsedSeconds", (beforeSnapshot - fullStartedNanos) / 1e9);
+            sample.put("snapshotDurationMillis", (afterSnapshot - beforeSnapshot) / 1e6);
+            sample.put("elapsedSeconds", (afterSnapshot - fullStartedNanos) / 1e9);
             sample.put("positionSeconds", position);
             sample.put("audioPositionSeconds", field(player, "lastAudioPosition", Long.class) / 1_000_000.0);
-            sample.put("engineClockReadMillis", (afterEngineRead - beforeEngineRead) / 1e6);
             sample.put("playing", field(player, "playRequested", Boolean.class));
             sample.put("audioDriving", field(player, "audioDriving", Boolean.class));
             sample.put("warning", player.warning());
-            long beforeRawRead = System.nanoTime();
-            sample.put("rawAudioPositionSeconds", clip.getMicrosecondPosition() / 1_000_000.0);
-            long afterRawRead = System.nanoTime();
-            sample.put("rawAudioReadMillis", (afterRawRead - beforeRawRead) / 1e6);
-            sample.put("rawAudioObservedElapsedSeconds", (afterRawRead - fullStartedNanos) / 1e9);
-            sample.put("elapsedAfterClockReadsSeconds", (afterRawRead - fullStartedNanos) / 1e9);
         }
+        // Preserve the independent device observation with its own causal
+        // timestamps; its latency remains visible in the evidence and next gap.
+        long beforeRawRead = System.nanoTime();
+        sample.put("rawAudioReadStartedElapsedSeconds", (beforeRawRead - fullStartedNanos) / 1e9);
+        sample.put("rawAudioPositionSeconds", clip.getMicrosecondPosition() / 1_000_000.0);
+        long afterRawRead = System.nanoTime();
+        sample.put("rawAudioReadMillis", (afterRawRead - beforeRawRead) / 1e6);
+        sample.put("rawAudioObservedElapsedSeconds", (afterRawRead - fullStartedNanos) / 1e9);
+        sample.put("elapsedAfterClockReadsSeconds", (afterRawRead - fullStartedNanos) / 1e9);
         long[] sourceTimestamps = player.metadata().frameTimestampsMicros();
         int requested = Arrays.binarySearch(sourceTimestamps, (long) (position * 1_000_000));
         if (requested < 0) requested = -requested - 2;

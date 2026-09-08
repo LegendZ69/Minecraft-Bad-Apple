@@ -109,6 +109,8 @@ def verify_reference_full_run(report: dict) -> dict:
     require(isinstance(samples, list) and len(samples) >= math.floor(duration / interval) + 1
             and 2 <= len(samples) <= math.ceil(duration / interval) + 3,
             "Missing or excessive full playback periodic samples")
+    sampling_mode = full.get("samplingMode")
+    require(sampling_mode in (None, "render-clock-snapshot-v1"), "Unsupported full playback sampling mode")
 
     previous = None
     observed_frames = set()
@@ -116,6 +118,26 @@ def verify_reference_full_run(report: dict) -> dict:
     for index, sample in enumerate(samples):
         require(isinstance(sample, dict), f"Invalid full playback sample {index}")
         sample_elapsed = number(sample, "elapsedSeconds")
+        require(sample.get("samplingMode") == sampling_mode, "Inconsistent full playback sampling mode")
+        if sampling_mode == "render-clock-snapshot-v1":
+            snapshot_start = number(sample, "snapshotStartedElapsedSeconds")
+            snapshot_duration = number(sample, "snapshotDurationMillis") / 1000
+            raw_start = number(sample, "rawAudioReadStartedElapsedSeconds")
+            raw_duration = number(sample, "rawAudioReadMillis") / 1000
+            raw_end = number(sample, "rawAudioObservedElapsedSeconds")
+            after_reads = number(sample, "elapsedAfterClockReadsSeconds")
+            raw_position = number(sample, "rawAudioPositionSeconds")
+            require(0 <= snapshot_start <= sample_elapsed <= raw_start <= raw_end <= elapsed + 0.25
+                    and snapshot_duration >= 0 and raw_duration >= 0
+                    and abs(sample_elapsed - snapshot_start - snapshot_duration) <= 1e-6
+                    and abs(raw_end - raw_start - raw_duration) <= 1e-6
+                    and abs(after_reads - raw_end) <= 1e-6,
+                    f"Inconsistent or backdated full playback diagnostic timestamps at sample {index}")
+            require(0 <= raw_position <= duration + 1,
+                    f"Out-of-range raw audio clock at full playback sample {index}")
+            if previous is not None:
+                require(snapshot_start >= previous["rawAudioObservedElapsedSeconds"],
+                        f"Full playback snapshot predates the previous diagnostic at sample {index}")
         position = number(sample, "positionSeconds")
         audio_position = number(sample, "audioPositionSeconds")
         uploaded_position = number(sample, "uploadedPositionSeconds")

@@ -98,6 +98,75 @@ class CloudSmokeVerifierTest(unittest.TestCase):
         report = self.full_reference_report()
         self.assertIs(report["fullPlayback"], VERIFIER.verify_reference_full_run(report))
 
+    def snapshot_reference_report(self):
+        report = self.full_reference_report()
+        report["fullPlayback"]["samplingMode"] = "render-clock-snapshot-v1"
+        for sample in report["fullPlayback"]["samples"]:
+            elapsed = sample["elapsedSeconds"]
+            sample.update({
+                "samplingMode": "render-clock-snapshot-v1",
+                "snapshotStartedElapsedSeconds": elapsed, "snapshotDurationMillis": 0,
+                "rawAudioReadStartedElapsedSeconds": elapsed, "rawAudioReadMillis": 0,
+                "rawAudioObservedElapsedSeconds": elapsed, "elapsedAfterClockReadsSeconds": elapsed,
+                "rawAudioPositionSeconds": sample["audioPositionSeconds"],
+            })
+        return report
+
+    def test_render_snapshot_keeps_slow_later_diagnostic_out_of_frame_age(self):
+        report = self.snapshot_reference_report()
+        sample = report["fullPlayback"]["samples"][2]
+        sample.update({"rawAudioReadMillis": 1500, "rawAudioPositionSeconds": 11.5,
+                       "rawAudioObservedElapsedSeconds": 11.5, "elapsedAfterClockReadsSeconds": 11.5})
+        self.assertGreater(sample["rawAudioPositionSeconds"] - sample["uploadedPositionSeconds"], 1)
+        VERIFIER.verify_reference_full_run(report)
+
+    def test_render_snapshot_still_rejects_stale_frozen_and_reversed_frames(self):
+        for mode in ("stale", "frozen", "reversed"):
+            with self.subTest(mode=mode):
+                report = self.snapshot_reference_report()
+                samples = report["fullPlayback"]["samples"]
+                if mode == "stale":
+                    samples[3]["uploadedFrame"] = 410
+                    samples[3]["uploadedPositionSeconds"] = 410 / 30
+                elif mode == "frozen":
+                    for key in ("positionSeconds", "audioPositionSeconds", "requestedFrame",
+                                "uploadedFrame", "uploadedPositionSeconds"):
+                        samples[3][key] = samples[2][key]
+                else:
+                    samples[3]["uploadedFrame"] = samples[2]["uploadedFrame"] - 1
+                with self.assertRaisesRegex(ValueError, "stale|stalled|backward"):
+                    VERIFIER.verify_reference_full_run(report)
+
+    def test_render_snapshot_rejects_backdated_or_inconsistent_diagnostic_timestamps(self):
+        for key, value in (("snapshotStartedElapsedSeconds", 9.5), ("snapshotDurationMillis", 1),
+                           ("rawAudioReadStartedElapsedSeconds", 9), ("rawAudioReadMillis", 1000),
+                           ("rawAudioObservedElapsedSeconds", 9), ("elapsedAfterClockReadsSeconds", 11)):
+            with self.subTest(key=key):
+                report = self.snapshot_reference_report()
+                report["fullPlayback"]["samples"][2][key] = value
+                with self.assertRaisesRegex(ValueError, "timestamps"):
+                    VERIFIER.verify_reference_full_run(report)
+
+    def test_render_snapshot_rejects_nonfinite_or_missing_diagnostic_measurements(self):
+        for key in ("snapshotStartedElapsedSeconds", "snapshotDurationMillis", "rawAudioReadStartedElapsedSeconds",
+                    "rawAudioReadMillis", "rawAudioObservedElapsedSeconds", "elapsedAfterClockReadsSeconds",
+                    "rawAudioPositionSeconds"):
+            for value in (None, float("nan"), float("inf")):
+                with self.subTest(key=key, value=value):
+                    report = self.snapshot_reference_report()
+                    report["fullPlayback"]["samples"][2][key] = value
+                    with self.assertRaisesRegex(ValueError, "invalid full playback"):
+                        VERIFIER.verify_reference_full_run(report)
+
+    def test_render_snapshot_rejects_unknown_or_mixed_sampling_modes(self):
+        for target in ("full", "sample"):
+            with self.subTest(target=target):
+                report = self.snapshot_reference_report()
+                item = report["fullPlayback"] if target == "full" else report["fullPlayback"]["samples"][2]
+                item["samplingMode"] = "postdated-clock"
+                with self.assertRaisesRegex(ValueError, "sampling mode"):
+                    VERIFIER.verify_reference_full_run(report)
+
     def test_full_reference_run_accepts_one_second_upload_lag_with_advancing_frames(self):
         report = self.full_reference_report()
         for sample in report["fullPlayback"]["samples"][1:-1]:
