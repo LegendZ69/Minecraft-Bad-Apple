@@ -99,15 +99,18 @@ jobs:
           python -m pip install yt-dlp==2026.8.19
           python tools/acquire_original.py --work-dir build/reference-source --archive build/smoke-game/badapple/reference.bapple --report-dir build/cloud-verification/reports
           python -c 'import json; assert json.load(open("build/cloud-verification/reports/reference-acquisition.json"))["status"] == "downloaded_converted_verified", "Original media unavailable: release verification cannot be completed; see access report. No bypass attempted."'
-      - name: Verify complete original reference in actual Minecraft
+      - name: Verify complete original reference with the exact production JAR
         env:
           ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
         run: |
           test -f build/smoke-game/badapple/reference.bapple
+          mkdir -p build/production-reference-game/badapple
+          cp build/smoke-game/badapple/reference.bapple build/production-reference-game/badapple/reference.bapple
+          cp tools/cloud-smoke-options.txt build/production-reference-game/options.txt
           parec --device=badapple.monitor --format=s16le --rate=48000 --channels=2 --file-format=wav build/reference-captured-audio.wav &
           capture_pid=$!
           trap 'kill -INT "$capture_pid" 2>/dev/null || true' EXIT
-          timeout 480s xvfb-run -a -s '-screen 0 1280x720x24' gradle --no-daemon runSmokeClient -PsmokeReference=true 2>&1 | tee build/cloud-verification/reports/original-minecraft-client.txt
+          timeout 600s build/production-toolchain/gradle-8.12/bin/gradle --no-daemon -p tools/production-smoke prodReferenceClient 2>&1 | tee build/cloud-verification/reports/original-minecraft-client.txt
           kill -INT "$capture_pid"
           wait "$capture_pid" || true
           trap - EXIT
@@ -140,6 +143,7 @@ jobs:
             build/production-verification/*.json
             build/production-verification/*.png
             build/production-game/logs/latest.log
+            build/production-reference-game/logs/latest.log
           if-no-files-found: warn
       - name: Preserve synthetic-only sink recording for audio diagnostics
         if: always()

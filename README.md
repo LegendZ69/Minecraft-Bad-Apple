@@ -86,7 +86,7 @@ the cloud audio tests; the default PulseAudio buffering can delay starts/seeks.
 The mod uses a 20 ms Java Sound streaming buffer rather than the standard
 one-second native clip buffer. It does not modify your system audio settings.
 
-PNG decoding happens on a background worker with a small prefetch buffer; textures are uploaded on the render thread. This avoids loading all frames into memory. The PCM audio clip is loaded in memory, capped at 256 MiB (about 23 minutes at the chosen format). Archives also enforce dimension, timestamp, frame-count, and entry-size limits.
+PNG decoding happens on a background worker with a small prefetch buffer; textures are uploaded on the render thread. Encoded PNGs use an expandable native buffer, including frames larger than LWJGL's fixed scratch stack. This avoids loading all frames into memory. The PCM audio clip is loaded in memory, capped at 256 MiB (about 23 minutes at the chosen format). Archives also enforce dimension, timestamp, frame-count, and entry-size limits.
 
 For fidelity, cap Minecraft at least as high as the source frame rate, face the screen squarely, use enough screen area on your monitor, and disable shaders/postprocessing that alter the picture. Shader packs and third-party renderers require separate compatibility testing.
 
@@ -101,7 +101,9 @@ python -m unittest discover -s tests -v
 
 The installable mod is `build/libs/minecraft-bad-apple-1.1.0.jar`.
 
-The GitHub Actions workflow installs the pinned toolchain, runs Python and Java tests, compiles/remaps the Fabric mod, checks reproducible JAR bytes, exhaustively compares decoded frames/timestamps/normalized PCM, and launches an actual Minecraft client under Xvfb/Mesa. The isolated smoke harness measures GPU pixels, screen orientation, controls, and a virtual stereo audio sink. The full original is downloaded only into the ephemeral runner when publicly accessible. Publication is gated on the successful main-branch build; release assets are downloaded and checksum-verified before and after publication.
+The GitHub Actions workflow installs the pinned toolchain, runs Python and Java tests, compiles/remaps the Fabric mod, checks reproducible JAR bytes, exhaustively compares decoded frames/timestamps/normalized PCM, and launches an actual Minecraft client under Xvfb/Mesa. The isolated smoke harness measures GPU pixels, screen orientation, controls, and a virtual stereo audio sink. A separate Gradle 8.12 / Loom 1.10.5 verification project runs Fabric's official production-test launcher without changing the main Gradle 8.8 / Loom 1.7.4 build. Both its synthetic controls test and full original playthrough must prove that the loaded mod is the exact release JAR by SHA-256, with development mode disabled and the intermediary namespace active.
+
+The full original is downloaded only into the ephemeral runner when publicly accessible. Publication is gated on the successful main-branch build; release assets are downloaded and checksum-verified before and after publication. This production test does not automate account login or exercise the authenticated Minecraft Launcher. Runtime reports count actual presented frames and skips; a complete playthrough does not imply every source frame was displayed.
 
 See the [v1.1.0 verification record](docs/releases/v1.1.0.md) and [historical v1.0.0 record](docs/releases/v1.0.0.md) for completed checks and explicit limits. Physical speakers, other players' computers, multiplayer synchronization, shader compatibility, and equivalence to an inaccessible YouTube reupload are not inferred from cloud tests.
 

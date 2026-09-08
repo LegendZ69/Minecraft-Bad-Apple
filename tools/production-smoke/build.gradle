@@ -22,8 +22,6 @@ java { toolchain.languageVersion = JavaLanguageVersion.of(21) }
 def repositoryDir = projectDir.toPath().resolve('../..').normalize().toFile()
 def releaseJar = new File(repositoryDir, 'build/libs/minecraft-bad-apple-1.1.0.jar')
 def smokeJar = new File(repositoryDir, 'build/smoke-libs/badapple-smoke.jar')
-def gameDirectory = new File(repositoryDir, 'build/production-game')
-def evidenceDirectory = new File(repositoryDir, 'build/production-verification')
 def releaseDigest = providers.provider {
     def digest = MessageDigest.getInstance('SHA-256')
     releaseJar.withInputStream { stream ->
@@ -34,30 +32,37 @@ def releaseDigest = providers.provider {
     HexFormat.of().formatHex(digest.digest())
 }
 
-tasks.register('prodSmokeClient', net.fabricmc.loom.task.prod.ClientProductionRunTask) {
-    // Replace, not append, the default collection: no locally compiled classes
-    // or this launcher's empty remapJar may substitute for the release JAR.
-    mods.setFrom(releaseJar, smokeJar, configurations.productionSmokeMods)
-    runDir = gameDirectory
-    useXVFB = true
-    jvmArgs.addAll('-Xmx3G', '-Dbadapple.smoke=true', '-Dbadapple.smoke.production=true',
-            '-Dbadapple.smoke.reference=false',
-            "-Dbadapple.smoke.output=${evidenceDirectory.absolutePath}",
-            "-Dbadapple.smoke.expectedGameDir=${gameDirectory.absolutePath}",
-            "-Dbadapple.smoke.expectedJar=${releaseJar.absolutePath}")
-    jvmArgs.add(releaseDigest.map { "-Dbadapple.smoke.expectedJarSha256=${it}".toString() })
-    // Normal local test identity; no account authentication or multiplayer.
-    // No development-mode flags, EULA flags, or agreement-file writes.
-    programArgs.addAll('--width', '1280', '--height', '720', '--username', 'BadAppleSmoke',
-            '--version', 'BadAppleProductionSmoke', '--accessToken', '0',
-            '--uuid', '00000000-0000-0000-0000-000000000000')
-    doFirst {
-        [releaseJar, smokeJar, new File(gameDirectory, 'badapple/smoke.bapple'),
-         new File(gameDirectory, 'options.txt')].each { required ->
-            if (!required.isFile()) throw new GradleException("Missing production smoke input: ${required}")
-        }
-        if (new File(gameDirectory, 'saves').exists()) {
-            throw new GradleException('Production smoke requires a fresh isolated game directory without existing saves')
+[prodSmokeClient: false, prodReferenceClient: true].each { taskName, referenceMode ->
+    def gameDirectory = new File(repositoryDir,
+            referenceMode ? 'build/production-reference-game' : 'build/production-game')
+    def evidenceDirectory = new File(repositoryDir,
+            referenceMode ? 'build/reference-verification' : 'build/production-verification')
+    def archiveName = referenceMode ? 'reference.bapple' : 'smoke.bapple'
+    tasks.register(taskName, net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+        // Replace, not append, the default collection: no locally compiled classes
+        // or this launcher's empty remapJar may substitute for the release JAR.
+        mods.setFrom(releaseJar, smokeJar, configurations.productionSmokeMods)
+        runDir = gameDirectory
+        useXVFB = true
+        jvmArgs.addAll('-Xmx3G', '-Dbadapple.smoke=true', '-Dbadapple.smoke.production=true',
+                "-Dbadapple.smoke.reference=${referenceMode}",
+                "-Dbadapple.smoke.output=${evidenceDirectory.absolutePath}",
+                "-Dbadapple.smoke.expectedGameDir=${gameDirectory.absolutePath}",
+                "-Dbadapple.smoke.expectedJar=${releaseJar.absolutePath}")
+        jvmArgs.add(releaseDigest.map { "-Dbadapple.smoke.expectedJarSha256=${it}".toString() })
+        // Normal local test identity; no account authentication or multiplayer.
+        // No development-mode flags, EULA flags, or agreement-file writes.
+        programArgs.addAll('--width', '1280', '--height', '720', '--username', 'BadAppleSmoke',
+                '--version', 'BadAppleProductionSmoke', '--accessToken', '0',
+                '--uuid', '00000000-0000-0000-0000-000000000000')
+        doFirst {
+            [releaseJar, smokeJar, new File(gameDirectory, "badapple/${archiveName}"),
+             new File(gameDirectory, 'options.txt')].each { required ->
+                if (!required.isFile()) throw new GradleException("Missing production smoke input: ${required}")
+            }
+            if (new File(gameDirectory, 'saves').exists()) {
+                throw new GradleException('Production smoke requires a fresh isolated game directory without existing saves')
+            }
         }
     }
 }

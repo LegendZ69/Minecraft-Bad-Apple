@@ -200,7 +200,21 @@ def validate_smoke(evidence: dict[str, bytes]) -> dict:
     return report
 
 
-def validate_original(evidence: dict[str, bytes], evidence_dir: Path | None) -> dict:
+def validate_loaded_production_jar(runtime: dict, jar: Path, version: str, context: str) -> dict:
+    """Shared identity gate for synthetic and full-reference production runs."""
+    require(runtime.get("runtimeMode") == "production" and runtime.get("developmentEnvironment") is False
+            and runtime.get("runtimeNamespace") == "intermediary",
+            f"{context} must run without development mode in the intermediary namespace.")
+    require(runtime.get("loadedModVersion") == version, f"{context} loaded a different mod version.")
+    jar_digest = sha256(jar)
+    require(runtime.get("loadedModJarSha256") == jar_digest and runtime.get("expectedModJarSha256") == jar_digest,
+            f"{context} did not load the exact release JAR SHA-256.")
+    return {"releaseJarBound": True, "runtimeMode": "production", "developmentEnvironment": False,
+            "runtimeNamespace": "intermediary", "loadedModVersion": version, "loadedModJarSha256": jar_digest}
+
+
+def validate_original(evidence: dict[str, bytes], evidence_dir: Path | None, *,
+                      production_jar: Path | None = None, version: str | None = None) -> dict:
     """Fail closed unless acquisition, source pixels, full runtime and sink agree."""
     required = ("reports/reference-acquisition.json", "reports/original-source-comparison.json",
                 "reference/smoke-report.json", "reference/audio-output-report.json")
@@ -208,6 +222,13 @@ def validate_original(evidence: dict[str, bytes], evidence_dir: Path | None) -> 
         require(name in evidence, f"Original-reference release evidence is required: {name}")
     require(evidence_dir is not None, "Original-reference evidence directory is required.")
     acquisition, comparison, runtime, audio = (read_json(evidence[name], name) for name in required)
+    if production_jar is not None:
+        require(isinstance(version, str), "Original-reference production binding requires a release version.")
+        runtime_binding = validate_loaded_production_jar(runtime, production_jar, version, "Original-reference production runtime")
+        runtime_binding["scope"] = "Uninterrupted full-original playback on the exact release JAR in a non-development intermediary runtime."
+    else:
+        runtime_binding = {"releaseJarBound": False,
+                           "scope": "Full-original runtime verified without requiring production-mode release-JAR identity."}
     original_url = "https://www.nicovideo.jp/watch/sm8628149"
     require(acquisition.get("status") == "downloaded_converted_verified"
             and acquisition.get("sourceUrl") == original_url,
@@ -291,6 +312,7 @@ def validate_original(evidence: dict[str, bytes], evidence_dir: Path | None) -> 
             "archiveSha256": archive_digest, "frameCount": video["frameCount"],
             "width": video["width"], "height": video["height"], "durationSeconds": duration,
             "fullMinecraftPlaybackVerified": True, "stereoVirtualSinkOutputVerified": True,
+            "runtime": runtime_binding,
             "youtubeReferenceEquivalenceVerified": False, "physicalAudioVerified": False}
 
 
@@ -303,14 +325,8 @@ def validate_production(evidence: dict[str, bytes], evidence_dir: Path | None,
             "Production release-JAR smoke and audio evidence are required.")
     runtime = read_json(evidence[report_name], report_name)
     audio = read_json(evidence[audio_name], audio_name)
-    require(runtime.get("runtimeMode") == "production" and runtime.get("developmentEnvironment") is False
-            and runtime.get("runtimeNamespace") == "intermediary",
-            "Production smoke must run without development mode in the intermediary namespace.")
-    require(runtime.get("loadedModVersion") == version,
-            "Production smoke loaded a different mod version.")
-    jar_digest = sha256(jar)
-    require(runtime.get("loadedModJarSha256") == jar_digest and runtime.get("expectedModJarSha256") == jar_digest,
-            "Production smoke did not load the exact release JAR SHA-256.")
+    binding = validate_loaded_production_jar(runtime, jar, version, "Production smoke")
+    jar_digest = binding["loadedModJarSha256"]
     for name in CHECKPOINTS:
         for suffix in SCREENSHOT_SUFFIXES:
             relative = "production/" + name + suffix
@@ -384,7 +400,8 @@ def package_release(*, version: str, commit: str, jar: Path, output: Path,
     validate_jar(jar, version)
     evidence = collect_evidence(evidence_dir)
     smoke = None if no_smoke_required else validate_smoke(evidence)
-    original = validate_original(evidence, evidence_dir) if require_original else None
+    original = (validate_original(evidence, evidence_dir, production_jar=jar if require_production else None,
+                                  version=version) if require_original else None)
     production = validate_production(evidence, evidence_dir, jar, version) if require_production else None
     files = ["README.md", "tools/prepare_video.py", "tools/verify_archive.py", "tools/generate_fixture.py"]
     for name in files:

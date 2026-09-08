@@ -4,7 +4,7 @@ Mod versions below all target Minecraft Java Edition **1.21.1** unless stated
 otherwise. Project code and synthetic test material are separate from the
 original animation and recording, which are not distributed in these releases.
 
-## 1.1.0 — original-media and exact-JAR runtime verification pending
+## 1.1.0 — provenance, playback fixes, and release verification
 
 - Add distinct official, original, and user-reference download selections and
   source provenance.
@@ -16,7 +16,7 @@ original animation and recording, which are not distributed in these releases.
 - Add isolated Minecraft cloud smoke testing and saved verification evidence.
 - Add a separate exact-JAR, SHA-256-bound production-namespace smoke check using
   Fabric's official [production run tasks](https://docs.fabricmc.net/develop/loom/production-run-tasks);
-  its results remain pending.
+  require both synthetic and full-original exact-JAR verification for publication.
 - Correct stale audio-clock readings after backward seeks, restart, and loops;
   retain elapsed time when a stalled device falls back to silent playback and
   timestamp native queries after they return to avoid false stall detection.
@@ -31,13 +31,24 @@ original animation and recording, which are not distributed in these releases.
   Minecraft synthetic controls/strict stereo-audio verification in Fabric's
   development runtime in
   [integrated run 34178311059](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059).
+- Complete the original 219.1-second animation in that development-runtime run
+  without audio fallback: 59 assertions and 45 exact GPU readbacks passed.
+  The run displayed 2,295 of 6,573 source frames (34.9%), skipping 4,278; this is
+  not a claim of displaying every frame or achieving 30 FPS.
+- Pass 106 Python and 38 Java tests plus the exact-JAR synthetic production
+  controls/GPU/strict stereo stage in
+  [run 34178900645](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178900645).
+  These are completed-step results, not a claim that the whole run completed.
+  The final gate extensions pass 110 Python tests locally and are rerun by CI.
 - Document primary reference sources, distribution limits, and versioned builds.
 
 Both YouTube references remain sign-in/bot gated, so equivalence with them is not
 verified. Original-source conversion and 219-second synthetic conversion stress
-checks are complete; original-media and exact-JAR production-test verification
-remain pending. See the
-[v1.1.0 release record](docs/releases/v1.1.0.md) for the verification checklist.
+checks and full original-media development-runtime playback are complete.
+Full-original production playback is an enforced final publication gate, not an
+already-observed result in this historical record. See the
+[v1.1.0 release record](docs/releases/v1.1.0.md) and packaged `build-info.json`
+for the final build identity, runtime bindings, and evidence.
 The production-test launcher is separate from an authenticated Minecraft
 Launcher installation; account/profile setup is not exercised.
 

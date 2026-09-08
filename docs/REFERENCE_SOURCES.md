@@ -14,9 +14,9 @@ Alstroemeria Records, or the animation's creators.
 
 These selections never silently substitute for each other. An official upload is
 not necessarily the same edit, encoding, duration, or frame sequence as the
-user-linked upload. Their exact equivalence has **not** been verified. The cloud
-check below verifies the downloaded NicoVideo source and its conversion only;
-it does not establish equivalence with either YouTube upload.
+user-linked upload. Their exact equivalence has **not** been verified. Source
+comparisons below verify downloaded NicoVideo files and their conversions;
+they do not establish equivalence with either YouTube upload.
 
 ## Why the label upload is an official reference
 
@@ -49,7 +49,7 @@ recorded below. Both YouTube URLs returned a sign-in/bot-confirmation gate in
 that cloud run; neither was downloaded or compared. Search snippets and uploader
 metadata alone are not media-level verification.
 
-### Completed original-source conversion check
+### First completed original-source conversion check
 
 [Cloud run 34176311242](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34176311242)
 on September 8, 2026 downloaded `sm8628149`, converted it, and exhaustively
@@ -81,15 +81,43 @@ bytes. The hash identifies this downloaded file, not every encoding the service
 might provide later. The technical report does not independently authenticate
 ownership or establish redistribution rights.
 
-Full playback of this original-source archive inside Minecraft is **not yet
-verified** in this record; the current
-[integrated run](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059)
-checks that separately after compilation, synthetic runtime testing, and
-source-to-archive verification. Runtime checks use actual Minecraft 1.21.1 with
-Fabric's development runtime, not the remapped JAR in an installed production
-profile. Neither YouTube upload has a verified frame/audio comparison with this
-source. See the [v1.1.0 verification record](releases/v1.1.0.md) for final scope
-and results when available.
+### Completed full-animation Minecraft check
+
+[Integrated run 34178311059](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178311059)
+repeated the source-to-archive comparison and completed the original animation
+in actual Minecraft 1.21.1 using Fabric's development runtime: 219.1 seconds of
+media in 219.2002 seconds, ending at frame 6,572 without audio fallback or
+warnings. All 59 runtime assertions passed, including 45 periodic GPU samples
+covering 8,847,360 exact uploaded-texture pixels. Both virtual audio channels
+contained 218.4 seconds of non-silent output; physical speakers were not tested.
+
+Only 2,295 of the 6,573 source frames (34.9%) were uploaded during the playthrough;
+4,278 were skipped. All source frames are preserved in the archive, but this
+test does **not** demonstrate every frame displayed or 30 FPS presentation. Its
+mean was 10.74 world-render callbacks per second and maximum sampled uploaded
+frame lag was 374 ms. The evidence does not isolate the throughput limitation's
+cause. GPU equality is checked against the texture actually uploaded, not every
+original frame or the final perspective-transformed screen.
+
+This full run used a separately downloaded container. Its decoded RGB sequence
+hash matches the first acquisition above, even though the container and archive
+hashes differ:
+
+| Full-run file | SHA-256 |
+| --- | --- |
+| Downloaded source | `d6c418b138b2c2003500175b3f121eff0fb910f1cfc6966a3128d17589fd75cf` |
+| Converted archive | `3ef298e4be6ee183a678d56140a370ad01bf33b9b5f095351a1e92e26a127c53` |
+
+The exact-JAR synthetic production controls/GPU/stereo stage subsequently passed
+in [run 34178900645](https://github.com/LegendZ69/Minecraft-Bad-Apple/actions/runs/34178900645);
+that completed-step result does not assert whole-run completion. The final
+publication gate additionally requires a full-original production-namespace run
+bound to the same release JAR SHA-256. Its actual result is recorded in packaged
+`build-info.json` and runtime reports, not inferred from the earlier development
+run above. The official Fabric production-test launcher is distinct from an
+authenticated Minecraft Launcher installation. Neither YouTube upload has a
+verified frame/audio comparison with this source. See the
+[v1.1.0 verification record](releases/v1.1.0.md) for the complete evidence scope.
 
 `python tools/probe_references.py --report build/reference-access.json` records a fresh,
 bounded public metadata probe for each exact URL. A metadata success does not

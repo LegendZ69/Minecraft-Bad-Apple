@@ -467,7 +467,14 @@ public final class CloudSmokeClient implements ClientModInitializer {
         fullPresentedFrames.set(uploaded);
         if (fullFirstUploadedFrame < 0) fullFirstUploadedFrame = uploaded;
         fullLastUploadedFrame = uploaded;
-        boolean ended = !player.isPlaying() && player.positionSeconds() >= player.durationSeconds();
+        // MovieScreen already updated the device-led clock in this render pass.
+        // Do not inject a second potentially blocking native query every frame
+        // merely to observe its state; independent clock checks remain periodic.
+        boolean playing;
+        synchronized (player) {
+            playing = field(player, "playRequested", Boolean.class);
+        }
+        boolean ended = !playing && player.positionSeconds() >= player.durationSeconds();
         if (ended && uploaded == player.metadata().frameCount() - 1) {
             sampleFullPlayback(uploaded, true);
             fullRunning = false;
@@ -839,14 +846,17 @@ public final class CloudSmokeClient implements ClientModInitializer {
         require(!loader.isDevelopmentEnvironment(), "production: development environment is disabled");
         require("intermediary".equals(loader.getMappingResolver().getCurrentRuntimeNamespace()),
                 "production: Minecraft runtime namespace is intermediary");
-        require(!referenceMode, "production: isolated synthetic fixture only");
+        String gameDirectory = referenceMode ? "production-reference-game" : "production-game";
+        String evidenceDirectory = referenceMode ? "reference-verification" : "production-verification";
         Path expectedGame = Path.of(Objects.requireNonNull(System.getProperty("badapple.smoke.expectedGameDir")))
                 .toRealPath();
         Path game = loader.getGameDir().toRealPath();
-        require(game.equals(expectedGame) && game.endsWith(Path.of("build", "production-game")),
+        require(game.equals(expectedGame) && game.endsWith(Path.of("build", gameDirectory)),
                 "production: designated isolated game directory");
-        require(output.toRealPath().equals(game.getParent().resolve("production-verification").toRealPath()),
+        require(output.toRealPath().equals(game.getParent().resolve(evidenceDirectory).toRealPath()),
                 "production: designated isolated evidence directory");
+        require(Files.isRegularFile(game.resolve("badapple").resolve(archiveName())),
+                "production: selected mode archive exists in designated isolated game directory");
 
         Path expectedJar = Path.of(Objects.requireNonNull(System.getProperty("badapple.smoke.expectedJar")))
                 .toRealPath();

@@ -276,7 +276,7 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertFalse(original["youtubeReferenceEquivalenceVerified"])
         self.assertTrue(metadata["verification"]["originalRequired"])
 
-    def test_require_original_integrates_with_real_full_run_verifier(self):
+    def full_original_evidence(self):
         from test_cloud_smoke_verifier import CloudSmokeVerifierTest
         evidence = self.original_evidence()
         runtime = evidence["reference/smoke-report.json"]
@@ -296,6 +296,10 @@ class PackageReleaseTests(unittest.TestCase):
             for name, seconds in zip(REFERENCE_CHECKPOINTS, (30, 60, 120, 60))
         ]
         (self.evidence / "reference/smoke-report.json").write_text(json.dumps(runtime))
+        return runtime
+
+    def test_require_original_integrates_with_real_full_run_verifier(self):
+        self.full_original_evidence()
         self.assertEqual(self.package(require_original=True)["verification"]["originalReference"]["status"], "passed")
 
     def test_require_original_cannot_package_missing_or_failed_acquisition(self):
@@ -438,6 +442,53 @@ class PackageReleaseTests(unittest.TestCase):
             (self.evidence / "production" / name).write_bytes(b"not public")
         selected = collect_evidence(self.evidence)
         self.assertEqual(sum(name.startswith("production/") for name in selected), 10)
+
+    def bind_full_original_to_production(self):
+        runtime = self.full_original_evidence()
+        production, _ = self.production_evidence()
+        runtime.update({key: production[key] for key in (
+            "runtimeMode", "developmentEnvironment", "runtimeNamespace", "loadedModVersion",
+            "loadedModJarSha256", "expectedModJarSha256")})
+        (self.evidence / "reference/smoke-report.json").write_text(json.dumps(runtime))
+        return runtime
+
+    def test_combined_original_and_production_gates_bind_full_playback_to_release_jar(self):
+        self.bind_full_original_to_production()
+        info = self.package(require_original=True, require_production=True)
+        runtime = info["verification"]["originalReference"]["runtime"]
+        self.assertTrue(runtime["releaseJarBound"])
+        self.assertFalse(runtime["developmentEnvironment"])
+        self.assertEqual(runtime["runtimeNamespace"], "intermediary")
+        self.assertEqual(runtime["loadedModJarSha256"], sha256(self.jar))
+        self.assertIn("full-original playback on the exact release JAR", runtime["scope"])
+
+    def test_combined_gate_rejects_wrong_full_original_loaded_or_expected_jar(self):
+        baseline = self.bind_full_original_to_production()
+        for field in ("loadedModJarSha256", "expectedModJarSha256", "loadedModVersion"):
+            with self.subTest(field=field):
+                runtime = copy.deepcopy(baseline)
+                runtime[field] = "1.0.0" if field == "loadedModVersion" else "f" * 64
+                (self.evidence / "reference/smoke-report.json").write_text(json.dumps(runtime))
+                with self.assertRaisesRegex(ReleaseError, "Original-reference production runtime"):
+                    self.package(require_original=True, require_production=True)
+
+    def test_combined_gate_rejects_development_full_original_even_if_synthetic_production_passed(self):
+        baseline = self.bind_full_original_to_production()
+        for field, value in (("runtimeMode", "development"), ("developmentEnvironment", True),
+                             ("runtimeNamespace", "named")):
+            with self.subTest(field=field):
+                runtime = copy.deepcopy(baseline)
+                runtime[field] = value
+                (self.evidence / "reference/smoke-report.json").write_text(json.dumps(runtime))
+                with self.assertRaisesRegex(ReleaseError, "Original-reference production runtime"):
+                    self.package(require_original=True, require_production=True)
+
+    def test_original_only_still_accepts_development_runtime_without_claiming_release_jar_binding(self):
+        runtime = self.full_original_evidence()
+        runtime.update(runtimeMode="development", developmentEnvironment=True, runtimeNamespace="named")
+        (self.evidence / "reference/smoke-report.json").write_text(json.dumps(runtime))
+        info = self.package(require_original=True)
+        self.assertFalse(info["verification"]["originalReference"]["runtime"]["releaseJarBound"])
 
 
 if __name__ == "__main__":
