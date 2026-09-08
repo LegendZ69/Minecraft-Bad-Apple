@@ -1,0 +1,77 @@
+name: Diagnose Java Sound device timing
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/audio-diagnostics]
+    paths:
+      - .github/workflows/audio.yml
+      - tools/AudioDeviceProbe.java
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [clip, line]
+        latency: [default, '20']
+    env:
+      PULSE_SINK: badapple
+      ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated audio diagnostic dependencies
+        run: sudo apt-get update && sudo apt-get install -y pulseaudio pulseaudio-utils libasound2-plugins
+      - name: Probe actual synthetic PCM playback and source clock
+        env:
+          PROBE_BACKEND: ${{ matrix.backend }}
+          PROBE_LATENCY: ${{ matrix.latency }}
+        run: |
+          mkdir -p build/audio-probe
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=badapple rate=48000 channels=2 format=s16le
+          pactl list sinks > build/audio-probe/sinks.txt
+          if test "$PROBE_LATENCY" != default; then
+            export PULSE_LATENCY_MSEC="$PROBE_LATENCY"
+          fi
+          parec --device=badapple.monitor --format=s16le --rate=48000 --channels=2 --file-format=wav build/audio-probe/captured-synthetic.wav &
+          capture_pid=$!
+          trap 'kill -INT "$capture_pid" 2>/dev/null || true' EXIT
+          javac -d build/audio-probe tools/AudioDeviceProbe.java
+          timeout 45s java -cp build/audio-probe AudioDeviceProbe "$PROBE_BACKEND" | tee build/audio-probe/device-timing.jsonl
+          kill -INT "$capture_pid"
+          wait "$capture_pid" || true
+          trap - EXIT
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from tools.verify_cloud_smoke import verify_audio
+          try:
+              report = verify_audio(Path('build/audio-probe/captured-synthetic.wav'))
+          except Exception as error:
+              report = {'status': 'failed', 'reason': str(error)}
+          Path('build/audio-probe/audio-analysis.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audio-probe-${{ matrix.backend }}-${{ matrix.latency }}
+          path: |
+            build/audio-probe/*.json
+            build/audio-probe/*.jsonl
+            build/audio-probe/*.txt
+            build/audio-probe/*.wav
+          if-no-files-found: warn
