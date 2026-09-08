@@ -28,6 +28,8 @@ class FakeGitHub:
         self.annotated = False
         self.calls = []
         self.failure = None
+        self.repository_push = True
+        self.create_failure = None
         self.corrupt_download = False
         self.corrupt_after_publication = False
         self.draft_by_tag_404 = False
@@ -56,7 +58,7 @@ class FakeGitHub:
         if command[1] == "api":
             endpoint = command[2]
             if endpoint == API_ROOT:
-                result = {"full_name": REPOSITORY, "permissions": {"push": True}}
+                result = {"full_name": REPOSITORY, "permissions": {"push": self.repository_push}}
             elif endpoint == f"{API_ROOT}/commits/{self.commit}":
                 result = {"sha": self.commit}
             elif endpoint == f"{API_ROOT}/git/ref/tags/{self.tag}":
@@ -77,6 +79,8 @@ class FakeGitHub:
             assert self.release is None
             assert "--draft" in command
             assert command[command.index("--target") + 1] == self.commit
+            if self.create_failure:
+                return subprocess.CompletedProcess(command, 1, "", self.create_failure)
             self.existing(draft=True, files={})
             self.tag_sha = None  # GitHub can defer tag creation until publication.
         elif command[1:3] == ["release", "upload"]:
@@ -159,6 +163,25 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(len(result["assets"]), 5)
         self.assertTrue(all("--latest" in command for command in self.mutations() if command[2] == "edit"))
         self.assertTrue(result["publishedNotesMatchRequested"])
+
+    def test_installation_token_push_metadata_does_not_override_release_api_acceptance(self):
+        self.github.repository_push = False
+        result = self.publish()
+        self.assertEqual(result["status"], "published_verified")
+        self.assertTrue(result["draftAssetsDownloadedAndVerifiedBeforePublishing"])
+        self.assertTrue(result["publishedAssetsDownloadedAndVerified"])
+        self.assertEqual([command[2] for command in self.mutations()], ["create", "upload", "edit"])
+
+    def test_create_permission_denial_stops_without_retry_upload_or_publication(self):
+        self.github.repository_push = False
+        self.github.create_failure = "gh: Resource not accessible by integration (HTTP 403)"
+        with self.assertRaisesRegex(PublicationError, "HTTP 403"):
+            self.publish()
+        self.assertEqual([command[2] for command in self.mutations()], ["create"])
+        self.assertEqual(self.github.calls[-1][1:3], ["release", "create"])
+        self.assertIsNone(self.github.release)
+        self.assertEqual(self.github.uploaded, {})
+        self.assertFalse(self.report.exists())
 
     def test_baseline_is_never_marked_latest(self):
         self.make_release("1.0.0")

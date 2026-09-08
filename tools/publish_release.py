@@ -200,8 +200,11 @@ def publish_release(*, directory: Path, notes: Path, report: Path) -> dict:
     previously_published = existing is not None and existing.get("draft") is False
     if existing is not None:
         check_release(existing, tag, commit, body)
-    if not previously_published:
-        require(repo.get("permissions", {}).get("push") is not False, "GitHub reports insufficient repository write permission.")
+    # Repository permissions.push is not an installation token's release
+    # capability. The release API requires Contents:write and enforces any
+    # additional workflow restrictions using the already-configured credentials:
+    # https://docs.github.com/en/rest/releases/releases#create-a-release
+    # Let that endpoint decide; gh() still stops on every mutation failure.
 
     with tempfile.TemporaryDirectory(prefix="badapple-publish-snapshot-") as temporary:
         snapshot = Path(temporary) / "assets"

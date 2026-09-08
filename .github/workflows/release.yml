@@ -50,6 +50,8 @@ jobs:
           python tools/package_release.py --verify-directory dist/v1.1.0
           python -c 'import json,os; assert json.load(open("dist/v1.1.0/build-info.json"))["commit"] == os.environ["EXPECTED_BUILD_COMMIT"]'
           test "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')" = "$EXPECTED_BUILD_COMMIT"
+      - name: Publish and re-download v1.1.0 to verify every asset
+        run: python tools/publish_release.py --directory dist/v1.1.0 --notes docs/releases/v1.1.0.md --report build/v1.1.0-publication.json
       - name: Reuse an existing immutable baseline release on retries
         id: baseline
         run: |
@@ -113,8 +115,6 @@ jobs:
           if-no-files-found: error
       - name: Publish and re-download v1.0.0 to verify every asset
         run: python tools/publish_release.py --directory dist/v1.0.0 --notes docs/releases/v1.0.0.md --report build/v1.0.0-publication.json
-      - name: Publish and re-download v1.1.0 to verify every asset
-        run: python tools/publish_release.py --directory dist/v1.1.0 --notes docs/releases/v1.1.0.md --report build/v1.1.0-publication.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
