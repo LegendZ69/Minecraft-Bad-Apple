@@ -9,6 +9,7 @@ The converter never resizes, thresholds, interpolates, or changes the frame rate
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -24,6 +25,15 @@ import zipfile
 from fractions import Fraction
 
 REFERENCE_URL = "https://www.youtube.com/watch?v=FtutLA63Cp8"
+OFFICIAL_URL = "https://www.youtube.com/watch?v=i41KoE0iMYU"
+ORIGINAL_URL = "https://www.nicovideo.jp/watch/sm8628149"
+# Deliberately exclude URLs, cookies, request headers, signed download links,
+# comments, and arbitrary downloader metadata. These fields are provenance
+# claims from the downloader, not proof of the uploader's identity.
+SOURCE_METADATA_FIELDS = (
+    "id", "title", "uploader", "uploader_id", "channel", "channel_id",
+    "upload_date", "duration", "extractor_key",
+)
 MAX_DIMENSION = 4096
 MAX_FRAMES = 500_000
 MAX_DURATION_MICROS = 6 * 60 * 60 * 1_000_000
@@ -34,6 +44,29 @@ MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 class ConversionError(Exception):
     """An actionable source, dependency, or conversion problem."""
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sanitize_source_metadata(metadata: dict | None) -> dict:
+    """Keep bounded, public creator fields only; never persist raw info JSON."""
+    if not isinstance(metadata, dict):
+        return {}
+    safe = {}
+    for key in SOURCE_METADATA_FIELDS:
+        value = metadata.get(key)
+        if isinstance(value, str):
+            safe[key] = value[:2048]
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if math.isfinite(value):
+                safe[key] = value
+    return safe
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess:
@@ -135,7 +168,8 @@ def _validate_png(path: Path, width: int, height: int) -> None:
 
 
 def prepare_video(source: Path, output: Path, *, force: bool = False,
-                  source_url: str | None = None, ffmpeg: str = "ffmpeg",
+                  source_url: str | None = None, source_metadata: dict | None = None,
+                  ffmpeg: str = "ffmpeg",
                   ffprobe: str = "ffprobe") -> dict:
     """Atomically write a .bapple ZIP; existing output survives any failed job."""
     source, output = Path(source).resolve(), Path(output).absolute()
@@ -148,11 +182,15 @@ def prepare_video(source: Path, output: Path, *, force: bool = False,
     if output.exists() and not output.is_file():
         raise ConversionError(f"Output is not a regular file: {output}")
     manifest, video_start, has_audio = probe_video(source, ffprobe)
+    manifest["sourceSha256"] = sha256_file(source)
     sample_count = math.ceil(Fraction(manifest["durationMicros"] * AUDIO_RATE, 1_000_000))
     if has_audio and sample_count * 4 + 4096 > MAX_AUDIO_BYTES:
         raise ConversionError("Audio exceeds the player's 256 MiB limit (about 23 minutes 18 seconds at 48 kHz stereo). Use a shorter source.")
     if source_url:
         manifest["sourceUrl"] = source_url
+    safe_metadata = sanitize_source_metadata(source_metadata)
+    if safe_metadata:
+        manifest["sourceMetadata"] = safe_metadata
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".bapple-", dir=output.parent) as folder:
         temp = Path(folder)
@@ -221,11 +259,16 @@ def _downloader() -> list[str] | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Examples:\n  python tools/prepare_video.py 'Bad Apple.mp4' --output bad_apple.bapple\n  python tools/prepare_video.py --check\n  python tools/prepare_video.py --download-reference --output bad_apple.bapple\n\nThe download option uses the exact linked reference URL. Downloads require yt-dlp.\nLimits: 4096 pixels per side, 500,000 frames, six hours without audio;\n256 MiB audio (about 23 minutes 18 seconds at 48 kHz stereo).\nFull-resolution frames can require several gigabytes of temporary disk space.")
+        epilog="Examples:\n  python tools/prepare_video.py 'Bad Apple.mp4' --output bad_apple.bapple\n  python tools/prepare_video.py --check\n  python tools/prepare_video.py --download-reference --output bad_apple.bapple\n  python tools/prepare_video.py --download-official --output official.bapple\n\nSources are explicit and never silently substituted. The official YouTube release\nis a different upload/edit from the user's linked reference. Downloads require yt-dlp\nand permission to use the media. Metadata records provenance claims, not authenticity.\nLimits: 4096 pixels per side, 500,000 frames, six hours without audio;\n256 MiB audio (about 23 minutes 18 seconds at 48 kHz stereo).\nFull-resolution frames can require several gigabytes of temporary disk space.")
     parser.add_argument("video", nargs="?", type=Path, help="local source video (first video and audio streams)")
     parser.add_argument("--output", "-o", type=Path, help="destination .bapple archive (defaults to the source filename)")
     parser.add_argument("--force", action="store_true", help="replace an existing output only after successful conversion")
-    parser.add_argument("--download-reference", action="store_true", help=f"download {REFERENCE_URL} using yt-dlp, then convert")
+    downloads = parser.add_mutually_exclusive_group()
+    downloads.add_argument("--download-reference", action="store_true", help=f"download the user's exact linked upload: {REFERENCE_URL}")
+    downloads.add_argument("--download-official", action="store_true", help=f"download the separate official YouTube release (different edit): {OFFICIAL_URL}")
+    downloads.add_argument("--download-original", action="store_true", help=f"download the original Nico video: {ORIGINAL_URL}")
+    parser.add_argument("--source-url", help="record the provenance URL for a local source (not an authenticity check)")
+    parser.add_argument("--source-info", type=Path, help="local yt-dlp info JSON; only bounded public creator fields are recorded")
     parser.add_argument("--check", action="store_true", help="check prerequisites and exit")
     args = parser.parse_args(argv)
     if args.check:
@@ -237,29 +280,36 @@ def main(argv: list[str] | None = None) -> int:
                 missing.append(executable)
         print(f"yt-dlp (optional download): {'available' if _downloader() else 'not installed; python -m pip install yt-dlp'}")
         return 1 if missing else 0
-    if bool(args.video) == bool(args.download_reference):
-        parser.error("provide a local video or --download-reference")
+    download_url = OFFICIAL_URL if args.download_official else ORIGINAL_URL if args.download_original else REFERENCE_URL if args.download_reference else None
+    if bool(args.video) == bool(download_url):
+        parser.error("provide one local video or one explicit download option")
+    if download_url and (args.source_url or args.source_info):
+        parser.error("--source-url and --source-info apply only to local sources")
     try:
-        if args.download_reference:
+        if download_url:
             downloader = _downloader()
             if downloader is None:
                 raise ConversionError("Reference downloads require yt-dlp. Install it with: python -m pip install yt-dlp")
             output = args.output or Path("bad_apple.bapple")
             with tempfile.TemporaryDirectory(prefix="bad-apple-source-") as folder:
-                print("Downloading the linked reference…", file=sys.stderr)
+                print(f"Downloading explicitly selected source: {download_url}", file=sys.stderr)
                 result = run(downloader + ["--no-playlist", "--format", "bv*+ba/b", "--merge-output-format", "mkv",
-                    "--output", str(Path(folder) / "reference.%(ext)s"), "--print", "after_move:filepath", REFERENCE_URL])
+                    "--write-info-json", "--output", str(Path(folder) / "reference.%(ext)s"), "--print", "after_move:filepath", download_url])
                 paths = result.stdout.decode("utf-8", errors="replace").strip().splitlines()
                 if not paths or not Path(paths[-1]).is_file():
                     raise ConversionError("yt-dlp did not return a usable downloaded video path.")
-                manifest = prepare_video(Path(paths[-1]), output, force=args.force, source_url=REFERENCE_URL)
+                source = Path(paths[-1])
+                info_path = source.with_suffix(".info.json")
+                metadata = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else None
+                manifest = prepare_video(source, output, force=args.force, source_url=download_url, source_metadata=metadata)
         else:
             output = args.output or args.video.with_suffix(".bapple")
-            manifest = prepare_video(args.video, output, force=args.force)
+            metadata = json.loads(args.source_info.read_text(encoding="utf-8")) if args.source_info else None
+            manifest = prepare_video(args.video, output, force=args.force, source_url=args.source_url, source_metadata=metadata)
         print(f"Created {output.resolve()} — {manifest['width']}×{manifest['height']}, {manifest['frameCount']:,} frames, "
               f"{manifest['durationMicros'] / 1_000_000:.3f}s, {'synchronized audio' if manifest['audio'] else 'no audio stream'}.")
         return 0
-    except (ConversionError, OSError, wave.Error) as exc:
+    except (ConversionError, OSError, wave.Error, json.JSONDecodeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

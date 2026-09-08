@@ -2,7 +2,7 @@ plugins {
     id 'fabric-loom' version '1.7.4'
 }
 
-version = '1.0.0'
+version = '1.1.0'
 group = 'dev.legend.badapple'
 base { archivesName = 'minecraft-bad-apple' }
 
@@ -30,3 +30,37 @@ processResources {
     filesMatching('fabric.mod.json') { expand(version: project.version) }
 }
 test { useJUnitPlatform() }
+
+sourceSets {
+    smoke {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+
+loom {
+    mods {
+        badapple { sourceSet sourceSets.main }
+        badapple_smoke { sourceSet sourceSets.smoke }
+    }
+    runs {
+        smokeClient {
+            client()
+            name 'Bad Apple Cloud Smoke'
+            source sourceSets.smoke
+            runDir 'build/smoke-game'
+            vmArg '-Dbadapple.smoke=true'
+            def referenceMode = project.findProperty('smokeReference') == 'true'
+            vmArg "-Dbadapple.smoke.reference=${referenceMode}"
+            vmArg "-Dbadapple.smoke.output=${layout.buildDirectory.dir(referenceMode ? 'reference-verification' : 'cloud-verification').get().asFile.absolutePath}"
+            programArgs '--width', '1280', '--height', '720'
+            vmArg '-Xmx3G'
+        }
+    }
+}
+
+check.dependsOn tasks.named('compileSmokeJava')
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}

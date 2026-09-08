@@ -1,6 +1,7 @@
 """Integration tests using tiny, generated sources; no reference media required."""
 
 import io
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -14,7 +15,47 @@ import wave
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.prepare_video import ConversionError, prepare_video, probe_video
+from tools.prepare_video import (
+    ConversionError, OFFICIAL_URL, ORIGINAL_URL, REFERENCE_URL, main,
+    prepare_video, probe_video, sanitize_source_metadata,
+)
+
+
+class ProvenanceTests(unittest.TestCase):
+    def test_metadata_allowlist_never_copies_private_downloader_fields(self):
+        safe = sanitize_source_metadata({"id": "123", "title": "x" * 5000, "channel": "Creator",
+            "duration": 219.0, "http_headers": {"Cookie": "secret"}, "url": "signed token",
+            "cookies": "secret", "requested_formats": [{"url": "secret"}], "uploader": {"unexpected": 1},
+            "upload_date": True, "extractor_key": float("nan")})
+        self.assertEqual(safe, {"id": "123", "title": "x" * 2048, "channel": "Creator", "duration": 219.0})
+
+    def test_explicit_download_options_use_exact_source_and_safe_metadata(self):
+        for option, expected_url in (("--download-reference", REFERENCE_URL),
+                                     ("--download-official", OFFICIAL_URL),
+                                     ("--download-original", ORIGINAL_URL)):
+            with self.subTest(option=option):
+                def download(command):
+                    self.assertEqual(command[-1], expected_url)
+                    self.assertIn("--write-info-json", command)
+                    path = Path(command[command.index("--output") + 1].replace("%(ext)s", "mkv"))
+                    path.write_bytes(b"mock source")
+                    path.with_suffix(".info.json").write_text(json.dumps({"channel": "Creator", "http_headers": {"Cookie": "secret"}}))
+                    return subprocess.CompletedProcess(command, 0, stdout=(str(path) + "\n").encode())
+                fake_manifest = {"width": 1, "height": 1, "frameCount": 1, "durationMicros": 1_000_000, "audio": None}
+                with mock.patch("tools.prepare_video._downloader", return_value=["yt-dlp"]), \
+                     mock.patch("tools.prepare_video.run", side_effect=download), \
+                     mock.patch("tools.prepare_video.prepare_video", return_value=fake_manifest) as convert, \
+                     mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO):
+                    self.assertEqual(main([option]), 0)
+                    self.assertEqual(convert.call_args.kwargs["source_url"], expected_url)
+                    self.assertEqual(convert.call_args.kwargs["source_metadata"]["channel"], "Creator")
+
+    def test_download_selection_is_exclusive(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit):
+                main(["--download-official", "--download-reference"])
+            with self.assertRaises(SystemExit):
+                main(["source.mkv", "--download-official"])
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
@@ -69,7 +110,8 @@ class PrepareVideoTests(unittest.TestCase):
     def test_exact_pixels_timestamps_dimensions_and_audio_duration(self):
         source = self.make_source(audio=True)
         output = self.root / "output movie.bapple"
-        manifest = prepare_video(source, output, source_url="https://example.invalid/source")
+        manifest = prepare_video(source, output, source_url="https://example.invalid/source",
+                                 source_metadata={"channel": "Test creator", "http_headers": {"Cookie": "secret"}})
         self.assertEqual((manifest["width"], manifest["height"], manifest["frameCount"]), (16, 12, 6))
         self.assertEqual(manifest["frameTimestampsMicros"], [0, 250_000, 500_000, 750_000, 1_000_000, 1_250_000])
         self.assertEqual(manifest["durationMicros"], 1_500_000)
@@ -78,6 +120,8 @@ class PrepareVideoTests(unittest.TestCase):
             self.assertEqual(json.loads(bundle.read("manifest.json")), manifest)
             self.assertEqual(manifest["source"], "source clip.mkv")
             self.assertEqual(manifest["sourceUrl"], "https://example.invalid/source")
+            self.assertEqual(manifest["sourceSha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertEqual(manifest["sourceMetadata"], {"channel": "Test creator"})
             for index in range(self.count):
                 self.assertEqual(bundle.getinfo(f"frames/{index:06d}.png").compress_type, zipfile.ZIP_STORED)
             self.assertEqual(bundle.getinfo("audio.wav").compress_type, zipfile.ZIP_DEFLATED)

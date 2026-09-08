@@ -2,6 +2,7 @@ name: Build and verify
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,6 +12,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      PULSE_SINK: badapple
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -24,16 +29,81 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install media tools
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg xvfb pulseaudio pulseaudio-utils libasound2-plugins libgl1-mesa-dri
       - name: Verify video conversion
-        run: python -m unittest discover -s tests -v
+        run: |
+          mkdir -p build/cloud-verification/reports
+          python -m unittest discover -s tests -v 2>&1 | tee build/cloud-verification/reports/python-tests.txt
       - name: Compile mod and test playback
-        run: gradle --no-daemon build
+        run: |
+          gradle --no-daemon build 2>&1 | tee build/cloud-verification/reports/gradle-build.txt
+          cp build/test-results/test/TEST-*.xml build/cloud-verification/reports/
+      - name: Verify reproducible production JAR
+        run: |
+          cp build/libs/minecraft-bad-apple-1.1.0.jar build/first-build.jar
+          gradle --no-daemon jar remapJar --rerun-tasks
+          cmp build/first-build.jar build/libs/minecraft-bad-apple-1.1.0.jar
+          sha256sum build/first-build.jar build/libs/minecraft-bad-apple-1.1.0.jar > build/cloud-verification/reports/reproducible-build.txt
+      - name: Generate and verify diagnostic media
+        run: |
+          python tools/generate_fixture.py --output build/synthetic.mkv
+          python tools/prepare_video.py build/synthetic.mkv --output build/smoke-game/badapple/smoke.bapple
+          python tools/verify_archive.py build/smoke-game/badapple/smoke.bapple --source build/synthetic.mkv --report build/cloud-verification/reports/synthetic-source-comparison.json
+          cp tools/cloud-smoke-options.txt build/smoke-game/options.txt
+      - name: Exercise actual Minecraft renderer, controls, and audio sink
+        env:
+          ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=badapple
+          parec --device=badapple.monitor --format=s16le --rate=48000 --channels=2 --file-format=wav build/captured-audio.wav &
+          capture_pid=$!
+          trap 'kill -INT "$capture_pid" 2>/dev/null || true' EXIT
+          timeout 480s xvfb-run -a -s '-screen 0 1280x720x24' gradle --no-daemon runSmokeClient 2>&1 | tee build/cloud-verification/reports/minecraft-client.txt
+          kill -INT "$capture_pid"
+          wait "$capture_pid" || true
+          trap - EXIT
+          python tools/verify_cloud_smoke.py build/cloud-verification/smoke-report.json --audio-capture build/captured-audio.wav --require-audio
+      - name: Exhaustive full-length synthetic stress test
+        run: |
+          python tools/generate_fixture.py --duration 219 --output build/stress.mkv
+          python tools/prepare_video.py build/stress.mkv --output build/stress.bapple
+          python tools/verify_archive.py build/stress.bapple --source build/stress.mkv --report build/cloud-verification/reports/stress-source-comparison.json
+      - name: Retrieve and exhaustively compare the original creator reference
+        run: |
+          python -m pip install yt-dlp==2026.8.19
+          python tools/acquire_original.py --work-dir build/reference-source --archive build/smoke-game/badapple/reference.bapple --report-dir build/cloud-verification/reports
+      - name: Verify original reference in actual Minecraft when publicly accessible
+        env:
+          ALSA_CONFIG_PATH: ${{ github.workspace }}/tools/cloud-smoke-asound.conf
+        run: |
+          if test -f build/smoke-game/badapple/reference.bapple; then
+            timeout 480s xvfb-run -a -s '-screen 0 1280x720x24' gradle --no-daemon runSmokeClient -PsmokeReference=true 2>&1 | tee build/cloud-verification/reports/original-minecraft-client.txt
+            python tools/verify_cloud_smoke.py build/reference-verification/smoke-report.json --reference
+            cp build/reference-verification/smoke-report.json build/cloud-verification/reports/original-minecraft-report.json
+            mkdir -p build/cloud-verification/reference
+            cp build/reference-verification/*.json build/reference-verification/*.png build/cloud-verification/reference/
+          fi
+      - name: Package versioned release and verify checksums
+        run: |
+          python tools/package_release.py --version 1.1.0 --commit "$GITHUB_SHA" --jar build/libs/minecraft-bad-apple-1.1.0.jar --output dist/v1.1.0 --evidence-dir build/cloud-verification
+          python tools/package_release.py --verify-directory dist/v1.1.0
       - uses: actions/upload-artifact@v4
         with:
-          name: minecraft-bad-apple-fabric-1.21.1
-          path: |
-            build/libs/minecraft-bad-apple-1.0.0.jar
-            tools/prepare_video.py
-            README.md
+          name: minecraft-bad-apple-v1.1.0
+          path: dist/v1.1.0/*
           if-no-files-found: error
+      - name: Preserve cloud verification evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-verification-evidence
+          path: |
+            build/cloud-verification/**/*.json
+            build/cloud-verification/**/*.txt
+            build/cloud-verification/**/*.xml
+            build/cloud-verification/*.png
+            build/reference-verification/*.json
+            build/reference-verification/*.png
+            build/smoke-game/logs/latest.log
+          if-no-files-found: warn

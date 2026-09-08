@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "badapple_smoke",
+  "version": "1.0.0",
+  "name": "Bad Apple isolated cloud verification",
+  "description": "Development-only synthetic-media smoke test. Never shipped in the production JAR.",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.legend.badapple.smoke.CloudSmokeClient"] },
+  "depends": { "badapple": "*", "fabric-api": "*", "minecraft": "1.21.1", "java": ">=21" }
+}
